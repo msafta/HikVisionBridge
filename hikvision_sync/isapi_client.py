@@ -98,6 +98,7 @@ def _classify_person_response(response) -> SyncResult:
     Classify ISAPI Person creation response.
     Returns SyncResult with status and message.
     """
+    # Auth failure is always fatal
     if response.status_code == 401:
         return SyncResult(
             SyncResultStatus.FATAL,
@@ -105,37 +106,40 @@ def _classify_person_response(response) -> SyncResult:
             "person"
         )
     
-    if response.status_code != 200:
-        return SyncResult(
-            SyncResultStatus.FATAL,
-            f"HTTP {response.status_code}: {response.text[:200]}",
-            "person"
-        )
-    
+    # Try to parse JSON body even for non-200 responses
+    # Some devices return HTTP 400 with "employeeNoAlreadyExist" in the body
     try:
         data = response.json()
         status_code = data.get("statusCode")
         sub_status_code = data.get("subStatusCode", "")
         
-        # Success
+        # Success (HTTP 200)
         if status_code == 1 and sub_status_code == "ok":
             return SyncResult(SyncResultStatus.SUCCESS, "Person created/updated successfully", "person")
         
-        # Already exists - treat as success
+        # Already exists - treat as success (can be HTTP 200 or HTTP 400)
         if status_code == 6 and sub_status_code == "employeeNoAlreadyExist":
             return SyncResult(SyncResultStatus.SUCCESS, "Person already exists on device", "person")
         
-        # Other error
+        # Other ISAPI error (even if HTTP 200, but statusCode indicates error)
         error_msg = data.get("errorMsg", "") or data.get("statusString", "")
         return SyncResult(
             SyncResultStatus.FATAL,
             f"ISAPI error: statusCode={status_code}, subStatusCode={sub_status_code}, errorMsg={error_msg}",
             "person"
         )
-    except Exception as exc:
+    except Exception:
+        # If we can't parse JSON, treat non-200 as fatal
+        if response.status_code != 200:
+            return SyncResult(
+                SyncResultStatus.FATAL,
+                f"HTTP {response.status_code}: {response.text[:200]}",
+                "person"
+            )
+        # HTTP 200 but couldn't parse JSON - unexpected
         return SyncResult(
             SyncResultStatus.FATAL,
-            f"Failed to parse response: {exc}",
+            f"HTTP 200 but failed to parse response: {response.text[:200]}",
             "person"
         )
 

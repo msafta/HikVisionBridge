@@ -24,6 +24,7 @@ from requests.auth import HTTPDigestAuth
 
 from hikvision_sync.supabase_client import SupabaseClient
 from hikvision_sync.isapi_client import create_person_on_device, add_face_image_to_device, rate_limit_delay
+from hikvision_sync.orchestration import sync_angajat_to_device
 
 app = FastAPI()
 
@@ -324,6 +325,57 @@ async def test_add_face_image(angajat_id: str = Query(...), device_id: str = Que
         # Test add_face_image_to_device
         supabase_url = _APP_CONFIG.get("supabase_url")
         result = await add_face_image_to_device(device, angajat, supabase_url)
+        
+        return {
+            "status": "ok",
+            "result": result.to_dict(),
+            "device": {"id": device.get("id"), "ip_address": device.get("ip_address")},
+            "angajat": {"id": angajat.get("id"), "name": f"{angajat.get('nume', '')} {angajat.get('prenume', '')}".strip()},
+        }
+    except Exception as exc:
+        import traceback
+        return {
+            "status": "error",
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+            "traceback": traceback.format_exc(),
+        }
+
+
+@app.post("/api/test-isapi/sync-angajat-to-device")
+async def test_sync_angajat_to_device(angajat_id: str = Query(...), device_id: str = Query(None)):
+    """
+    Test endpoint for sync_angajat_to_device orchestration function.
+    This tests the full sync flow: person creation + photo addition.
+    Query params:
+        angajat_id: UUID of angajat to sync (required)
+        device_id: Optional device ID (if not provided, uses first active device)
+    """
+    if not _SUPABASE_CLIENT:
+        return {"status": "error", "error": "Supabase client not initialized"}
+    
+    try:
+        # Fetch angajat
+        angajat = await _SUPABASE_CLIENT.get_angajat_with_biometrie(angajat_id)
+        if not angajat:
+            return {"status": "error", "error": f"Angajat {angajat_id} not found"}
+        
+        # Fetch devices
+        devices = await _SUPABASE_CLIENT.get_active_devices()
+        if not devices:
+            return {"status": "error", "error": "No active devices found"}
+        
+        # Select device
+        if device_id:
+            device = next((d for d in devices if d.get("id") == device_id), None)
+            if not device:
+                return {"status": "error", "error": f"Device {device_id} not found"}
+        else:
+            device = devices[0]  # Use first device
+        
+        # Test sync_angajat_to_device (full orchestration)
+        supabase_url = _APP_CONFIG.get("supabase_url")
+        result = await sync_angajat_to_device(angajat, device, supabase_url)
         
         return {
             "status": "ok",

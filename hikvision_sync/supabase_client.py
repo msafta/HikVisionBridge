@@ -48,7 +48,7 @@ class SupabaseClient:
             response = await client.get(
                 url,
                 headers=headers,
-                timeout=10.0,
+                timeout=30.0,  # Increased timeout for Edge Function calls
             )
             response.raise_for_status()
             result = response.json()
@@ -68,7 +68,7 @@ class SupabaseClient:
             response = await client.get(
                 url,
                 headers=headers,
-                timeout=10.0,
+                timeout=30.0,  # Increased timeout for Edge Function calls
             )
             response.raise_for_status()
             result = response.json()
