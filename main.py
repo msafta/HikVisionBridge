@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import re
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -10,23 +11,334 @@ from pathlib import Path
 from typing import List, Optional
 from uuid import uuid4
 
+import httpx
+import jwt
 import requests
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from jwt import PyJWKClient
 from requests.auth import HTTPDigestAuth
+
+from hikvision_sync.supabase_client import SupabaseClient
+from hikvision_sync.isapi_client import create_person_on_device, add_face_image_to_device, rate_limit_delay
 
 app = FastAPI()
 
 _ROOT_DIR = Path(__file__).resolve().parent
 _LOG_DIR = _ROOT_DIR
 _CONFIG_PATH = _ROOT_DIR / "config" / "devices.json"
+_APP_CONFIG_PATH = _ROOT_DIR / "config" / "app_settings.json"
 _FACE_DIR = _ROOT_DIR / "faces"
 _FACE_DIR.mkdir(exist_ok=True)
 
 templates = Jinja2Templates(directory=str(_ROOT_DIR / "templates"))
 app.mount("/faces", StaticFiles(directory=str(_FACE_DIR)), name="faces")
+
+def _load_app_config() -> dict:
+    if not _APP_CONFIG_PATH.exists():
+        return {}
+    try:
+        return json.loads(_APP_CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+_APP_CONFIG = _load_app_config()
+
+
+def _get_config_value(env_key: str, config_key: str, default=None):
+    env_val = os.getenv(env_key)
+    if env_val:
+        return env_val
+    return _APP_CONFIG.get(config_key, default)
+
+
+_SUPABASE_JWKS_URL = _get_config_value("SUPABASE_JWKS_URL", "supabase_jwks_url")
+_SUPABASE_JWT_SECRET = _get_config_value("SUPABASE_JWT_SECRET", "supabase_jwt_secret")
+_SUPABASE_URL = _get_config_value("SUPABASE_URL", "supabase_url")
+_SUPABASE_SERVICE_ROLE_KEY = _get_config_value("SUPABASE_SERVICE_ROLE_KEY", "supabase_service_role_key")
+_ALLOWED_ORIGINS = _get_config_value("ALLOWED_ORIGINS", "allowed_origins", [])
+if isinstance(_ALLOWED_ORIGINS, str):
+    _ALLOWED_ORIGINS = [origin.strip() for origin in _ALLOWED_ORIGINS.split(",") if origin.strip()]
+if not _ALLOWED_ORIGINS:
+    _ALLOWED_ORIGINS = ["http://localhost:3000"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# Initialize Supabase client
+_SUPABASE_CLIENT = SupabaseClient(_SUPABASE_URL, "hikvision-sync-2024") if _SUPABASE_URL else None
+
+
+# Legacy function wrappers for backward compatibility (if needed)
+async def get_active_devices() -> List[dict]:
+    """Wrapper for SupabaseClient.get_active_devices()."""
+    if not _SUPABASE_CLIENT:
+        raise ValueError("SUPABASE_URL not configured")
+    return await _SUPABASE_CLIENT.get_active_devices()
+
+
+async def get_angajat_with_biometrie(angajat_id: str) -> Optional[dict]:
+    """Wrapper for SupabaseClient.get_angajat_with_biometrie()."""
+    if not _SUPABASE_CLIENT:
+        raise ValueError("SUPABASE_URL not configured")
+    return await _SUPABASE_CLIENT.get_angajat_with_biometrie(angajat_id)
+
+
+async def get_all_active_angajati_with_biometrie() -> List[dict]:
+    """Wrapper for SupabaseClient.get_all_active_angajati_with_biometrie()."""
+    if not _SUPABASE_CLIENT:
+        raise ValueError("SUPABASE_URL not configured")
+    return await _SUPABASE_CLIENT.get_all_active_angajati_with_biometrie()
+
+
+async def save_pontaj_event(angajat_id: str, dispozitiv_id: str, event_time: str) -> dict:
+    """Wrapper for SupabaseClient.save_pontaj_event()."""
+    if not _SUPABASE_CLIENT:
+        raise ValueError("SUPABASE_URL not configured")
+    return await _SUPABASE_CLIENT.save_pontaj_event(angajat_id, dispozitiv_id, event_time)
+
+
+class _AuthVerifier:
+    def __init__(self, jwks_url: Optional[str], jwt_secret: Optional[str]):
+        self.jwks_client = PyJWKClient(jwks_url) if jwks_url and jwks_url.strip() else None
+        self.jwt_secret = jwt_secret
+
+    def verify(self, token: str) -> dict:
+        if not token:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+        
+        # Try JWKS first (for RS256 user tokens)
+        if self.jwks_client:
+            try:
+                signing_key = self.jwks_client.get_signing_key_from_jwt(token).key
+                return jwt.decode(
+                    token,
+                    signing_key,
+                    algorithms=["RS256"],
+                    options={"verify_aud": False},
+                )
+            except Exception as jwks_exc:
+                # JWKS failed, fall through to JWT secret fallback
+                # Log the error for debugging (can be removed later)
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.debug(f"JWKS verification failed: {jwks_exc}, trying JWT secret fallback")
+        
+        # Fall back to JWT secret (for HS256 tokens)
+        if self.jwt_secret:
+            try:
+                return jwt.decode(
+                    token,
+                    self.jwt_secret,
+                    algorithms=["HS256"],
+                    options={"verify_aud": False},
+                )
+            except Exception as exc:
+                # If both failed, provide helpful error message
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=f"Invalid token: {exc}. Check JWT secret matches Supabase JWT secret."
+                ) from exc
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="JWT verification is not configured (set SUPABASE_JWKS_URL or SUPABASE_JWT_SECRET)",
+        )
+
+
+_AUTH_VERIFIER = _AuthVerifier(_SUPABASE_JWKS_URL, _SUPABASE_JWT_SECRET)
+
+
+def _extract_bearer_token(auth_header: Optional[str]) -> Optional[str]:
+    if not auth_header:
+        return None
+    if not auth_header.lower().startswith("bearer "):
+        return None
+    return auth_header.split(" ", 1)[1].strip()
+
+
+async def require_auth(request: Request):
+    token = _extract_bearer_token(request.headers.get("Authorization"))
+    payload = _AUTH_VERIFIER.verify(token)
+    request.state.user = payload
+    return payload
+
+
+@app.get("/api/health-auth")
+async def auth_health_check(_: dict = Depends(require_auth)):
+    return {"status": "ok", "auth": "passed"}
+
+
+@app.get("/api/test-supabase/config")
+async def test_supabase_config():
+    """Test endpoint to verify Supabase Edge Function config is loaded."""
+    if not _SUPABASE_CLIENT:
+        return {"error": "Supabase client not initialized"}
+    return {
+        "supabase_url": _SUPABASE_URL,
+        "edge_function_url": _SUPABASE_CLIENT.edge_function_url,
+        "edge_function_api_key": _SUPABASE_CLIENT.api_key,
+        "headers": _SUPABASE_CLIENT._get_headers(),
+    }
+
+
+@app.get("/api/test-supabase/devices")
+async def test_supabase_devices():
+    """Test endpoint to verify Supabase device fetching works via Edge Function."""
+    try:
+        devices = await get_active_devices()
+        return {"status": "ok", "count": len(devices), "devices": devices}
+    except Exception as exc:
+        return {"status": "error", "error": str(exc), "error_type": type(exc).__name__}
+
+
+@app.get("/api/test-supabase/angajati")
+async def test_supabase_angajati():
+    """Test endpoint to verify Supabase angajati fetching works."""
+    try:
+        angajati = await get_all_active_angajati_with_biometrie()
+        return {"status": "ok", "count": len(angajati), "angajati": angajati[:5]}  # Return first 5 for testing
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+@app.get("/api/test-supabase/angajat/{angajat_id}")
+async def test_supabase_angajat(angajat_id: str):
+    """Test endpoint to verify fetching a single angajat with biometrie works."""
+    try:
+        angajat = await get_angajat_with_biometrie(angajat_id)
+        if angajat:
+            return {"status": "ok", "angajat": angajat}
+        else:
+            return {"status": "not_found", "message": f"Angajat with id {angajat_id} not found"}
+    except Exception as exc:
+        return {"status": "error", "error": str(exc), "error_type": type(exc).__name__}
+
+
+# Phase 3 Test Endpoints - ISAPI Client Functions
+from hikvision_sync.isapi_client import create_person_on_device, add_face_image_to_device
+from fastapi import Query
+
+
+@app.post("/api/test-isapi/create-person")
+async def test_create_person(angajat_id: str = Query(...), device_id: str = Query(None)):
+    """
+    Test endpoint for create_person_on_device ISAPI function.
+    Query params:
+        angajat_id: UUID of angajat to sync (required)
+        device_id: Optional device ID (if not provided, uses first active device)
+    """
+    if not _SUPABASE_CLIENT:
+        return {"status": "error", "error": "Supabase client not initialized"}
+    
+    try:
+        # Fetch angajat
+        angajat = await _SUPABASE_CLIENT.get_angajat_with_biometrie(angajat_id)
+        if not angajat:
+            return {"status": "error", "error": f"Angajat {angajat_id} not found"}
+        
+        # Check if employee_no exists
+        biometrie = angajat.get("biometrie", {})
+        if not biometrie.get("employee_no"):
+            return {"status": "error", "error": "Angajat missing employee_no"}
+        
+        # Fetch devices
+        devices = await _SUPABASE_CLIENT.get_active_devices()
+        if not devices:
+            return {"status": "error", "error": "No active devices found"}
+        
+        # Select device
+        if device_id:
+            device = next((d for d in devices if d.get("id") == device_id), None)
+            if not device:
+                return {"status": "error", "error": f"Device {device_id} not found"}
+        else:
+            device = devices[0]  # Use first device
+        
+        # Test create_person_on_device
+        result = await create_person_on_device(device, angajat)
+        
+        return {
+            "status": "ok",
+            "result": result.to_dict(),
+            "device": {"id": device.get("id"), "ip_address": device.get("ip_address")},
+            "angajat": {"id": angajat.get("id"), "name": f"{angajat.get('nume', '')} {angajat.get('prenume', '')}".strip()},
+        }
+    except Exception as exc:
+        import traceback
+        return {
+            "status": "error",
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+            "traceback": traceback.format_exc(),
+        }
+
+
+@app.post("/api/test-isapi/add-face-image")
+async def test_add_face_image(angajat_id: str = Query(...), device_id: str = Query(None)):
+    """
+    Test endpoint for add_face_image_to_device ISAPI function.
+    Query params:
+        angajat_id: UUID of angajat to sync photo for (required)
+        device_id: Optional device ID (if not provided, uses first active device)
+    """
+    if not _SUPABASE_CLIENT:
+        return {"status": "error", "error": "Supabase client not initialized"}
+    
+    try:
+        # Fetch angajat
+        angajat = await _SUPABASE_CLIENT.get_angajat_with_biometrie(angajat_id)
+        if not angajat:
+            return {"status": "error", "error": f"Angajat {angajat_id} not found"}
+        
+        # Check if employee_no and foto_fata_url exist
+        biometrie = angajat.get("biometrie", {})
+        if not biometrie.get("employee_no"):
+            return {"status": "error", "error": "Angajat missing employee_no"}
+        if not biometrie.get("foto_fata_url"):
+            return {"status": "error", "error": "Angajat missing foto_fata_url"}
+        
+        # Fetch devices
+        devices = await _SUPABASE_CLIENT.get_active_devices()
+        if not devices:
+            return {"status": "error", "error": "No active devices found"}
+        
+        # Select device
+        if device_id:
+            device = next((d for d in devices if d.get("id") == device_id), None)
+            if not device:
+                return {"status": "error", "error": f"Device {device_id} not found"}
+        else:
+            device = devices[0]  # Use first device
+        
+        # Test add_face_image_to_device
+        supabase_url = _APP_CONFIG.get("supabase_url")
+        result = await add_face_image_to_device(device, angajat, supabase_url)
+        
+        return {
+            "status": "ok",
+            "result": result.to_dict(),
+            "device": {"id": device.get("id"), "ip_address": device.get("ip_address")},
+            "angajat": {"id": angajat.get("id"), "name": f"{angajat.get('nume', '')} {angajat.get('prenume', '')}".strip()},
+        }
+    except Exception as exc:
+        import traceback
+        return {
+            "status": "error",
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+            "traceback": traceback.format_exc(),
+        }
 
 
 class _DailyLogger:
