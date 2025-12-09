@@ -24,7 +24,7 @@ from requests.auth import HTTPDigestAuth
 
 from hikvision_sync.supabase_client import SupabaseClient
 from hikvision_sync.isapi_client import create_person_on_device, add_face_image_to_device, rate_limit_delay
-from hikvision_sync.orchestration import sync_angajat_to_device
+from hikvision_sync.orchestration import sync_angajat_to_device, sync_photo_only_to_device, sync_photo_only_to_device
 
 app = FastAPI()
 
@@ -390,6 +390,127 @@ async def test_sync_angajat_to_device(angajat_id: str = Query(...), device_id: s
             "error": str(exc),
             "error_type": type(exc).__name__,
             "traceback": traceback.format_exc(),
+        }
+
+
+@app.post("/api/hikvision/sync-angajat-all-devices")
+async def sync_angajat_all_devices(
+    body: dict
+):
+    """
+    Sync one Angajat to all active devices.
+    
+    This endpoint syncs a single employee (angajat) to all active Hikvision devices.
+    It creates/updates the person record and adds the face photo if available.
+    Uses the same functionality as the test endpoint but for production use.
+    
+    Request body:
+    {
+        "angajat_id": "<uuid>"  # Required: UUID of the angajat to sync
+    }
+    
+    Returns:
+    {
+        "status": "ok",
+        "summary": {
+            "success": 2,    # Number of devices synced successfully
+            "partial": 1,    # Number of devices with partial success (person ok, photo failed)
+            "skipped": 0,    # Number of devices skipped (missing employee_no)
+            "fatal": 0       # Number of devices with fatal errors
+        },
+        "per_device": [
+            {
+                "device_id": "...",
+                "device_ip": "192.168.1.100",
+                "status": "success",
+                "message": "Person and photo synced successfully",
+                "step": "complete"
+            },
+            ...
+        ]
+    }
+    """
+    if not _SUPABASE_CLIENT:
+        return {
+            "status": "error",
+            "error": "Supabase client not initialized"
+        }
+    
+    # Validate request body
+    angajat_id = body.get("angajat_id")
+    if not angajat_id:
+        return {
+            "status": "error",
+            "error": "Missing required field: angajat_id"
+        }
+    
+    try:
+        # Fetch angajat with biometrie data
+        angajat = await _SUPABASE_CLIENT.get_angajat_with_biometrie(angajat_id)
+        if not angajat:
+            return {
+                "status": "error",
+                "error": f"Angajat {angajat_id} not found"
+            }
+        
+        # Fetch all active devices
+        devices = await _SUPABASE_CLIENT.get_active_devices()
+        if not devices:
+            return {
+                "status": "error",
+                "error": "No active devices found"
+            }
+        
+        # Initialize result aggregation
+        per_device_results = []
+        summary = {
+            "success": 0,
+            "partial": 0,
+            "skipped": 0,
+            "fatal": 0
+        }
+        
+        # Get Supabase URL for constructing image URLs
+        supabase_url = _APP_CONFIG.get("supabase_url")
+        
+        # Sync to each device sequentially (using existing sync_angajat_to_device function)
+        for device in devices:
+            device_id = device.get("id", "unknown")
+            device_ip = device.get("ip_address", "unknown")
+            
+            # Sync to this device using existing functionality
+            result = await sync_angajat_to_device(angajat, device, supabase_url)
+            
+            # Record result
+            per_device_results.append({
+                "device_id": device_id,
+                "device_ip": device_ip,
+                "status": result.status.value,
+                "message": result.message,
+                "step": result.step
+            })
+            
+            # Update summary counts
+            summary[result.status.value] = summary.get(result.status.value, 0) + 1
+            
+            # Add delay between devices (except after the last one)
+            if device != devices[-1]:
+                await rate_limit_delay(1.0)
+        
+        # Return structured result (always 200, status in payload)
+        return {
+            "status": "ok",
+            "summary": summary,
+            "per_device": per_device_results
+        }
+        
+    except Exception as exc:
+        import traceback
+        return {
+            "status": "error",
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+            "traceback": traceback.format_exc()
         }
 
 
