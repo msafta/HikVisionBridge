@@ -514,6 +514,163 @@ async def sync_angajat_all_devices(
         }
 
 
+@app.post("/api/hikvision/sync-all-to-all-devices")
+async def sync_all_to_all_devices(
+    body: dict
+):
+    """
+    Sync all active Angajati to all active devices (bulk sync).
+    
+    This endpoint syncs all active employees to all active Hikvision devices.
+    It creates/updates person records and adds face photos if available.
+    Continues syncing even if some angajati don't have photos uploaded yet.
+    
+    Request body:
+    {}  # No parameters required
+    
+    Returns:
+    {
+        "status": "ok",
+        "summary": {
+            "total_angajati": 10,
+            "total_devices": 3,
+            "success": 25,      # Total successful syncs (angajat+device combinations)
+            "partial": 2,        # Total partial syncs (person ok, photo failed)
+            "skipped": 3,        # Total skipped (missing employee_no)
+            "fatal": 0           # Total fatal errors
+        },
+        "per_angajat": [
+            {
+                "angajat_id": "...",
+                "angajat_name": "John Doe",
+                "summary": {
+                    "success": 2,
+                    "partial": 0,
+                    "skipped": 0,
+                    "fatal": 1
+                },
+                "per_device": [
+                    {
+                        "device_id": "...",
+                        "device_ip": "192.168.1.100",
+                        "status": "success",
+                        "message": "...",
+                        "step": "complete"
+                    },
+                    ...
+                ]
+            },
+            ...
+        ]
+    }
+    """
+    if not _SUPABASE_CLIENT:
+        return {
+            "status": "error",
+            "error": "Supabase client not initialized"
+        }
+    
+    try:
+        # Fetch all active angajati with biometrie data
+        angajati = await _SUPABASE_CLIENT.get_all_active_angajati_with_biometrie()
+        if not angajati:
+            return {
+                "status": "error",
+                "error": "No active angajati found"
+            }
+        
+        # Fetch all active devices
+        devices = await _SUPABASE_CLIENT.get_active_devices()
+        if not devices:
+            return {
+                "status": "error",
+                "error": "No active devices found"
+            }
+        
+        # Initialize result aggregation
+        per_angajat_results = []
+        total_summary = {
+            "total_angajati": len(angajati),
+            "total_devices": len(devices),
+            "success": 0,
+            "partial": 0,
+            "skipped": 0,
+            "fatal": 0
+        }
+        
+        # Get Supabase URL for constructing image URLs
+        supabase_url = _APP_CONFIG.get("supabase_url")
+        
+        # Sync each angajat to all devices sequentially
+        for angajat in angajati:
+            angajat_id = angajat.get("id", "unknown")
+            angajat_name = f"{angajat.get('nume', '')} {angajat.get('prenume', '')}".strip() or angajat.get("nume_complet", "Unknown")
+            
+            # Initialize per-angajat result
+            angajat_per_device_results = []
+            angajat_summary = {
+                "success": 0,
+                "partial": 0,
+                "skipped": 0,
+                "fatal": 0
+            }
+            
+            # Sync to each device sequentially
+            for device in devices:
+                device_id = device.get("id", "unknown")
+                device_ip = device.get("ip_address", "unknown")
+                
+                # Sync to this device (handles missing photo URLs automatically)
+                result = await sync_angajat_to_device(angajat, device, supabase_url)
+                
+                # Record result
+                angajat_per_device_results.append({
+                    "device_id": device_id,
+                    "device_ip": device_ip,
+                    "status": result.status.value,
+                    "message": result.message,
+                    "step": result.step
+                })
+                
+                # Update per-angajat summary
+                angajat_summary[result.status.value] = angajat_summary.get(result.status.value, 0) + 1
+                
+                # Update total summary
+                total_summary[result.status.value] = total_summary.get(result.status.value, 0) + 1
+                
+                # Add delay between devices (except after the last device for this angajat)
+                if device != devices[-1]:
+                    await rate_limit_delay(1.0)
+            
+            # Record per-angajat result
+            per_angajat_results.append({
+                "angajat_id": angajat_id,
+                "angajat_name": angajat_name,
+                "summary": angajat_summary,
+                "per_device": angajat_per_device_results
+            })
+            
+            # Add delay between angajati (except after the last one)
+            if angajat != angajati[-1]:
+                await rate_limit_delay(1.0)
+        
+        # Return structured result (always 200, status in payload)
+        return {
+            "status": "ok",
+            "summary": total_summary,
+            "per_angajat": per_angajat_results
+        }
+        
+    except Exception as exc:
+        import traceback
+        return {
+            "status": "error",
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+            "traceback": traceback.format_exc()
+        }
+
+
 class _DailyLogger:
     def __init__(self, name: str, filename_template: str):
         self.logger = logging.getLogger(name)
