@@ -1,0 +1,51 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyi
+*.pyd
+*.pyo
+*.egg-info/
+.eggs/
+build/
+dist/
+pip-wheel-metadata/
+*.sqlite3
+
+# Virtual environments
+.env
+.env.*
+.venv/
+venv/
+env/
+ENV/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and runtime output
+*.log
+logs/
+*.out
+*.err
+
+# App data and assets
+faces/
+*.jpg
+*.jpeg
+*.png
+*.bmp
+
+# Config (ignore for now)
+config/
+
+# Locks and misc
+*.pid
+*.lock
+
