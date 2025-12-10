@@ -227,7 +227,12 @@ async def test_supabase_angajat(angajat_id: str):
 
 
 # Phase 3 Test Endpoints - ISAPI Client Functions
-from hikvision_sync.isapi_client import create_person_on_device, add_face_image_to_device
+from hikvision_sync.isapi_client import (
+    create_person_on_device,
+    add_face_image_to_device,
+    update_face_image_to_device,
+    _build_face_image_update_payload,
+)
 from fastapi import Query
 
 
@@ -325,6 +330,119 @@ async def test_add_face_image(angajat_id: str = Query(...), device_id: str = Que
         # Test add_face_image_to_device
         supabase_url = _APP_CONFIG.get("supabase_url")
         result = await add_face_image_to_device(device, angajat, supabase_url)
+        
+        return {
+            "status": "ok",
+            "result": result.to_dict(),
+            "device": {"id": device.get("id"), "ip_address": device.get("ip_address")},
+            "angajat": {"id": angajat.get("id"), "name": f"{angajat.get('nume', '')} {angajat.get('prenume', '')}".strip()},
+        }
+    except Exception as exc:
+        import traceback
+        return {
+            "status": "error",
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+            "traceback": traceback.format_exc(),
+        }
+
+
+@app.get("/api/test-isapi/build-update-payload")
+async def test_build_update_payload(angajat_id: str = Query(...)):
+    """
+    Test endpoint for _build_face_image_update_payload() function.
+    Query params:
+        angajat_id: UUID of angajat to build payload for (required)
+    """
+    if not _SUPABASE_CLIENT:
+        return {"status": "error", "error": "Supabase client not initialized"}
+    
+    try:
+        # Fetch angajat
+        angajat = await _SUPABASE_CLIENT.get_angajat_with_biometrie(angajat_id)
+        if not angajat:
+            return {"status": "error", "error": f"Angajat {angajat_id} not found"}
+        
+        # Check if employee_no and foto_fata_url exist
+        biometrie = angajat.get("biometrie", {})
+        if not biometrie.get("employee_no"):
+            return {"status": "error", "error": "Angajat missing employee_no"}
+        if not biometrie.get("foto_fata_url"):
+            return {"status": "error", "error": "Angajat missing foto_fata_url"}
+        
+        # Get Supabase URL for constructing image URLs
+        supabase_url = _APP_CONFIG.get("supabase_url")
+        
+        # Build payload
+        payload = _build_face_image_update_payload(angajat, supabase_url)
+        
+        return {
+            "status": "ok",
+            "payload": payload,
+            "angajat": {
+                "id": angajat.get("id"),
+                "name": f"{angajat.get('nume', '')} {angajat.get('prenume', '')}".strip(),
+                "employee_no": biometrie.get("employee_no"),
+                "foto_fata_url": biometrie.get("foto_fata_url")
+            },
+            "supabase_url": supabase_url
+        }
+    except ValueError as exc:
+        return {
+            "status": "error",
+            "error": str(exc),
+            "error_type": "ValueError"
+        }
+    except Exception as exc:
+        import traceback
+        return {
+            "status": "error",
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+            "traceback": traceback.format_exc()
+        }
+
+
+@app.post("/api/test-isapi/update-face-image")
+async def test_update_face_image(angajat_id: str = Query(...), device_id: str = Query(None)):
+    """
+    Test endpoint for update_face_image_to_device ISAPI function (PUT).
+    Query params:
+        angajat_id: UUID of angajat to update photo for (required)
+        device_id: Optional device ID (if not provided, uses first active device)
+    """
+    if not _SUPABASE_CLIENT:
+        return {"status": "error", "error": "Supabase client not initialized"}
+    
+    try:
+        # Fetch angajat
+        angajat = await _SUPABASE_CLIENT.get_angajat_with_biometrie(angajat_id)
+        if not angajat:
+            return {"status": "error", "error": f"Angajat {angajat_id} not found"}
+        
+        # Check if employee_no and foto_fata_url exist
+        biometrie = angajat.get("biometrie", {})
+        if not biometrie.get("employee_no"):
+            return {"status": "error", "error": "Angajat missing employee_no"}
+        if not biometrie.get("foto_fata_url"):
+            return {"status": "error", "error": "Angajat missing foto_fata_url"}
+        
+        # Fetch devices
+        devices = await _SUPABASE_CLIENT.get_active_devices()
+        if not devices:
+            return {"status": "error", "error": "No active devices found"}
+        
+        # Select device
+        if device_id:
+            device = next((d for d in devices if d.get("id") == device_id), None)
+            if not device:
+                return {"status": "error", "error": f"Device {device_id} not found"}
+        else:
+            device = devices[0]  # Use first device
+        
+        # Test update_face_image_to_device (PUT)
+        supabase_url = _APP_CONFIG.get("supabase_url")
+        result = await update_face_image_to_device(device, angajat, supabase_url)
         
         return {
             "status": "ok",
