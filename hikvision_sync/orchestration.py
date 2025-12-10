@@ -2,7 +2,7 @@
 
 from typing import Optional
 from .models import SyncResult, SyncResultStatus
-from .isapi_client import create_person_on_device, add_face_image_to_device, update_face_image_to_device
+from .isapi_client import create_person_on_device, add_face_image_to_device, update_face_image_to_device, delete_user_from_device as delete_user_from_device_isapi
 
 
 async def sync_angajat_to_device(
@@ -238,4 +238,49 @@ async def update_photo_to_device(
             f"Both PUT update and POST create failed. PUT error: {put_result.message}. POST error: {post_result.message}",
             "photo"
         )
+
+
+async def delete_user_from_device(
+    angajat: dict,
+    device: dict
+) -> SyncResult:
+    """
+    Delete user from one Hikvision device.
+    
+    This function orchestrates user deletion from a single device.
+    The API endpoint will call this function for each device in the list.
+    
+    Steps:
+    1. Validate employee_no exists (skip if missing)
+    2. Call ISAPI delete_user_from_device() function
+    
+    Args:
+        angajat: Angajat dict with biometrie data (must include employee_no)
+        device: Device dict with ip_address, port, username, password_encrypted
+    
+    Returns:
+        SyncResult with status:
+        - SUCCESS: User deleted successfully (or user not found - idempotent)
+        - SKIPPED: Missing employee_no (non-fatal, continue with other devices)
+        - PARTIAL: Non-fatal ISAPI error (continue with other devices)
+        - FATAL: Device error (auth/network/timeout) - stop bulk sync
+    """
+    # Step 1: Validate employee_no exists
+    biometrie = angajat.get("biometrie", {})
+    employee_no = biometrie.get("employee_no")
+    
+    if not employee_no:
+        return SyncResult(
+            SyncResultStatus.SKIPPED,
+            "Missing employee_no - cannot delete user without employee number",
+            "validation"
+        )
+    
+    # Step 2: Call ISAPI delete_user_from_device() function
+    # Note: The ISAPI function handles validation and will return SKIPPED if employee_no is missing,
+    # but we check here first to avoid unnecessary API calls
+    result = await delete_user_from_device_isapi(device, angajat)
+    
+    # Return result directly (no additional steps needed for deletion)
+    return result
 

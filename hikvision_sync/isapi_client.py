@@ -134,6 +134,87 @@ def _build_face_image_update_payload(angajat: dict, supabase_url: Optional[str] 
     }
 
 
+def _build_delete_user_payload(angajat: dict) -> dict:
+    """
+    Build ISAPI User deletion payload from angajat data.
+    Args:
+        angajat: Dict with angajat data including biometrie.employee_no
+    Returns:
+        JSON payload dict for ISAPI User deletion
+    """
+    biometrie = angajat.get("biometrie", {})
+    employee_no = biometrie.get("employee_no")
+    
+    if not employee_no:
+        raise ValueError("employee_no is required for user deletion")
+    
+    return {
+        "UserInfoDetail": {
+            "mode": "byEmployeeNo",
+            "EmployeeNoList": [
+                {
+                    "employeeNo": str(employee_no)  # Device expects string format
+                }
+            ],
+            "operateType": "byTerminal",
+            "terminalNoList": [1]  # Default to terminal 1
+        }
+    }
+
+
+def _classify_delete_response(response) -> SyncResult:
+    """
+    Classify ISAPI User deletion response.
+    Returns SyncResult with status and message.
+    """
+    # Auth failure is always fatal
+    if response.status_code == 401:
+        return SyncResult(
+            SyncResultStatus.FATAL,
+            "Authentication failed - invalid device credentials",
+            "delete"
+        )
+    
+    # Try to parse JSON body even for non-200 responses
+    try:
+        data = response.json()
+        status_code = data.get("statusCode")
+        sub_status_code = data.get("subStatusCode", "")
+        status_string = data.get("statusString", "")
+        
+        # Success (HTTP 200) - statusCode: 1, subStatusCode: "ok"
+        if status_code == 1 and sub_status_code == "ok":
+            return SyncResult(SyncResultStatus.SUCCESS, "User deleted successfully", "delete")
+        
+        # User not found - treat as success (idempotent operation)
+        # Some devices may return different statusCodes for "user not found"
+        # Check common patterns for "not found" or "does not exist"
+        if status_code == 6 or "not found" in status_string.lower() or "does not exist" in status_string.lower():
+            return SyncResult(SyncResultStatus.SUCCESS, "User not found on device (already deleted or never existed)", "delete")
+        
+        # Other ISAPI error (even if HTTP 200, but statusCode indicates error)
+        error_msg = data.get("errorMsg", "") or status_string
+        return SyncResult(
+            SyncResultStatus.PARTIAL,
+            f"ISAPI error: statusCode={status_code}, subStatusCode={sub_status_code}, statusString={status_string}, errorMsg={error_msg}",
+            "delete"
+        )
+    except Exception:
+        # If we can't parse JSON, treat non-200 as fatal
+        if response.status_code != 200:
+            return SyncResult(
+                SyncResultStatus.FATAL,
+                f"HTTP {response.status_code}: {response.text[:200]}",
+                "delete"
+            )
+        # HTTP 200 but couldn't parse JSON - unexpected
+        return SyncResult(
+            SyncResultStatus.FATAL,
+            f"HTTP 200 but failed to parse response: {response.text[:200]}",
+            "delete"
+        )
+
+
 def _classify_person_response(response) -> SyncResult:
     """
     Classify ISAPI Person creation response.
@@ -182,6 +263,99 @@ def _classify_person_response(response) -> SyncResult:
             SyncResultStatus.FATAL,
             f"HTTP 200 but failed to parse response: {response.text[:200]}",
             "person"
+        )
+
+
+async def delete_user_from_device(device: dict, angajat: dict) -> SyncResult:
+    """
+    Delete user from Hikvision device via ISAPI.
+    Args:
+        device: Device dict with ip_address, port, username, password_encrypted
+        angajat: Angajat dict with biometrie data (must include employee_no)
+    Returns:
+        SyncResult with status and message
+    """
+    try:
+        # Build payload (validates employee_no exists)
+        payload = _build_delete_user_payload(angajat)
+        
+        # Build URL - handle both Supabase format (ip_address) and legacy format (ip)
+        ip = device.get("ip_address") or device.get("ip")
+        port = device.get("port") or 80  # Default to 80 if port is None or 0
+        if port == 8000:  # Likely wrong port - Hikvision devices typically use 80
+            print(f"  WARNING: Port is 8000, but device info endpoint works on port 80. Using port 80 instead.")
+            port = 80
+        url = f"http://{ip}:{port}/ISAPI/AccessControl/UserInfoDetail/Delete?format=json"
+        
+        # Handle both Supabase format (username/password_encrypted) and legacy format (user/password)
+        username = device.get("username") or device.get("user", "")
+        password = device.get("password_encrypted") or device.get("password", "")  # Note: despite name, this is plain password
+        
+        # Debug logging
+        print(f"DEBUG ISAPI Request (Delete User):")
+        print(f"  URL: {url}")
+        print(f"  Username: {username}")
+        print(f"  Password length: {len(password)}")
+        print(f"  Password (first 3 chars): {password[:3] if password else 'None'}...")
+        print(f"  Payload: {json.dumps(payload, indent=2)}")
+        
+        # Make request with Digest Auth
+        # Note: Despite endpoint name "Delete", ISAPI uses PUT method (per device docs)
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Hikvision-ISAPI-Client/1.0",
+        }
+        
+        print(f"  Headers: {headers}")
+        
+        response = requests.put(
+            url,
+            json=payload,
+            headers=headers,
+            auth=requests.auth.HTTPDigestAuth(username, password),
+            timeout=15.0,
+            verify=False,  # Disable SSL verification if device uses self-signed cert
+        )
+        
+        print(f"DEBUG Response (Delete User):")
+        print(f"  Status: {response.status_code}")
+        print(f"  Headers: {dict(response.headers)}")
+        print(f"  Body: {response.text[:500]}")
+        
+        return _classify_delete_response(response)
+        
+    except ValueError as exc:
+        # Missing employee_no - this is a validation error
+        print(f"DEBUG Validation error: {exc}")
+        return SyncResult(
+            SyncResultStatus.SKIPPED,
+            f"Missing employee_no - cannot delete user: {exc}",
+            "delete"
+        )
+    except requests.exceptions.Timeout as exc:
+        print(f"DEBUG Timeout error: {exc}")
+        return SyncResult(
+            SyncResultStatus.FATAL,
+            f"Request timeout - device {device.get('ip_address')} not responding: {exc}",
+            "delete"
+        )
+    except requests.exceptions.ConnectionError as exc:
+        print(f"DEBUG Connection error: {exc}")
+        print(f"DEBUG Connection error type: {type(exc)}")
+        print(f"DEBUG Connection error args: {exc.args}")
+        return SyncResult(
+            SyncResultStatus.FATAL,
+            f"Connection error - device {device.get('ip_address')} unreachable: {exc}",
+            "delete"
+        )
+    except Exception as exc:
+        import traceback
+        print(f"DEBUG Unexpected error: {exc}")
+        print(f"DEBUG Traceback: {traceback.format_exc()}")
+        return SyncResult(
+            SyncResultStatus.FATAL,
+            f"Unexpected error: {exc}",
+            "delete"
         )
 
 
