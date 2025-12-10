@@ -4,9 +4,7 @@ import json
 import logging
 import os
 import re
-import urllib.parse
 import xml.etree.ElementTree as ET
-from datetime import date
 from pathlib import Path
 from typing import List, Optional
 from uuid import uuid4
@@ -25,11 +23,12 @@ from requests.auth import HTTPDigestAuth
 from hikvision_sync.supabase_client import SupabaseClient
 from hikvision_sync.isapi_client import create_person_on_device, add_face_image_to_device, rate_limit_delay
 from hikvision_sync.orchestration import sync_angajat_to_device, sync_photo_only_to_device, update_photo_to_device, delete_user_from_device
+from hikvision_sync.events import DailyLogger, process_event_request
 
 app = FastAPI()
 
 _ROOT_DIR = Path(__file__).resolve().parent
-_LOG_DIR = _ROOT_DIR
+_LOG_DIR = _ROOT_DIR / "logs"
 _CONFIG_PATH = _ROOT_DIR / "config" / "devices.json"
 _APP_CONFIG_PATH = _ROOT_DIR / "config" / "app_settings.json"
 _FACE_DIR = _ROOT_DIR / "faces"
@@ -1149,30 +1148,9 @@ async def update_angajat_photo(
         }
 
 
-class _DailyLogger:
-    def __init__(self, name: str, filename_template: str):
-        self.logger = logging.getLogger(name)
-        self.logger.setLevel(logging.INFO)
-        self.logger.propagate = False
-        self.filename_template = filename_template
-        self.current_date = None
-
-    def get(self) -> logging.Logger:
-        today = date.today().isoformat()
-        if self.current_date != today:
-            for handler in list(self.logger.handlers):
-                self.logger.removeHandler(handler)
-                handler.close()
-            log_file = _LOG_DIR / self.filename_template.format(date=today)
-            handler = logging.FileHandler(log_file)
-            handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
-            self.logger.addHandler(handler)
-            self.current_date = today
-        return self.logger
-
-
-_EVENT_LOGGER = _DailyLogger("hikvision_events", "hikvision_events_{date}.log")
-_ACCESS_LOGGER = _DailyLogger("hikvision_access", "Access Log {date}.log")
+# Initialize event loggers
+_EVENT_LOGGER = DailyLogger("hikvision_events", "hikvision_events_{date}.log", _LOG_DIR, subfolder="hikvision_events")
+_ACCESS_LOGGER = DailyLogger("hikvision_access", "Access Log {date}.log", _LOG_DIR, subfolder="access")
 
 _HEADERS = {"Content-Type": "application/xml"}
 _device_cache: List[dict] = []
@@ -1328,79 +1306,6 @@ def _render_form(
     return templates.TemplateResponse("provision.html", context)
 
 
-def _extract_event(parsed):
-    if isinstance(parsed, dict):
-        event = parsed.get("AccessControllerEvent")
-        if isinstance(event, dict):
-            return event
-    elif isinstance(parsed, ET.Element):
-        event = parsed.find("AccessControllerEvent")
-        if event is not None:
-            return {child.tag: child.text for child in event}
-    return None
-
-
-def _is_access_event(parsed) -> bool:
-    event = _extract_event(parsed)
-    if not event:
-        return False
-    try:
-        major = int(event.get("majorEventType"))
-        sub = int(event.get("subEventType"))
-    except (TypeError, ValueError):
-        return False
-    return major == 5 and sub == 75
-
-
-def _extract_boundary(content_type: str) -> Optional[str]:
-    parts = [p.strip() for p in content_type.split(";")]
-    for part in parts:
-        if part.lower().startswith("boundary="):
-            boundary = part.split("=", 1)[1]
-            if boundary.startswith('"') and boundary.endswith('"'):
-                boundary = boundary[1:-1]
-            return boundary
-    return None
-
-
-def _parse_multipart_event(body: bytes, content_type: str, logger: logging.Logger):
-    boundary = _extract_boundary(content_type)
-    if not boundary:
-        logger.error("Multipart request missing boundary")
-        return None
-    delimiter = f"--{boundary}".encode()
-    for raw_part in body.split(delimiter):
-        part = raw_part.strip()
-        if not part or part == b"--":
-            continue
-        if part.endswith(b"--"):
-            part = part[:-2]
-        header_blob, _, content = part.partition(b"\r\n\r\n")
-        if b'name="event_log"' not in header_blob:
-            continue
-        payload = content.strip()
-        try:
-            return json.loads(payload)
-        except Exception as exc:
-            logger.error(f"Multipart event_log JSON parse error: {exc}")
-            return None
-    return None
-
-
-def _parse_request_body(body: bytes, content_type: str, logger: logging.Logger):
-    if "multipart/form-data" in content_type:
-        return _parse_multipart_event(body, content_type, logger)
-    if "application/json" in content_type:
-        try:
-            return json.loads(body)
-        except Exception as exc:
-            logger.error(f"JSON parse error: {exc}")
-    elif "xml" in content_type or body.strip().startswith(b"<"):
-        try:
-            return ET.fromstring(body)
-        except Exception as exc:
-            logger.error(f"XML parse error: {exc}")
-    return None
 
 
 @app.get("/admin/provision", response_class=HTMLResponse)
@@ -1472,22 +1377,17 @@ async def provision_submit(
 
 @app.post("/{full_path:path}")
 async def catch_all_post(request: Request, full_path: str):
-    logger = _EVENT_LOGGER.get()
-    # decode the path if percent-encoded
-    decoded_path = urllib.parse.unquote(full_path)
-    logger.info(f"Received POST to path: {decoded_path}")
-    
+    """Catch-all endpoint for receiving Hikvision device events."""
     body = await request.body()
     content_type = request.headers.get("content-type", "")
-    decoded_body = body.decode(errors="ignore")
-    logger.info(f"Content-Type: {content_type}")
-    logger.info(decoded_body)
     
-    parsed = _parse_request_body(body, content_type, logger)
-    if parsed and _is_access_event(parsed):
-        access_logger = _ACCESS_LOGGER.get()
-        access_logger.info(f"Received POST to path: {decoded_path}")
-        access_logger.info(f"Content-Type: {content_type}")
-        access_logger.info(decoded_body)
+    # Process event using events module
+    process_event_request(
+        body=body,
+        content_type=content_type,
+        path=full_path,
+        event_logger=_EVENT_LOGGER.get(),
+        access_logger=_ACCESS_LOGGER.get()
+    )
     
     return PlainTextResponse("OK")
