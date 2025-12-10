@@ -206,7 +206,9 @@ async def update_photo_to_device(
         )
     
     # Step 3: Attempt PUT update
+    print(f"  [UPDATE_PHOTO] Attempting PUT update for employee_no={biometrie.get('employee_no')}")
     put_result = await update_face_image_to_device(device, angajat, supabase_url)
+    print(f"  [UPDATE_PHOTO] PUT result: status={put_result.status.value}, message={put_result.message}")
     
     # Step 4: If PUT succeeded, return SUCCESS
     if put_result.status == SyncResultStatus.SUCCESS:
@@ -218,7 +220,9 @@ async def update_photo_to_device(
     
     # Step 5: PUT failed - fallback to POST (create)
     # Note: PUT failures return PARTIAL status, so we fallback to POST
+    print(f"  [UPDATE_PHOTO] PUT failed, falling back to POST for employee_no={biometrie.get('employee_no')}")
     post_result = await add_face_image_to_device(device, angajat, supabase_url)
+    print(f"  [UPDATE_PHOTO] POST result: status={post_result.status.value}, message={post_result.message}")
     
     # Return POST result (SUCCESS if fallback worked, PARTIAL if both failed)
     if post_result.status == SyncResultStatus.SUCCESS:

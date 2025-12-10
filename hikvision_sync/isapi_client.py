@@ -325,15 +325,39 @@ async def add_face_image_to_device(device: dict, angajat: dict, supabase_url: Op
         print(f"  Headers: {dict(response.headers)}")
         print(f"  Body: {response.text[:500]}")
         
-        if response.status_code == 200:
-            return SyncResult(SyncResultStatus.SUCCESS, "Face image added successfully", "photo")
-        else:
-            # Photo failure is non-fatal (partial success)
+        # Try to parse JSON body even for non-200 responses
+        # Some devices return HTTP 400 with "deviceUserAlreadyExistFace" in the body
+        try:
+            data = response.json()
+            status_code = data.get("statusCode")
+            sub_status_code = data.get("subStatusCode", "")
+            
+            # Success (HTTP 200)
+            if status_code == 1 and sub_status_code == "ok":
+                return SyncResult(SyncResultStatus.SUCCESS, "Face image added successfully", "photo")
+            
+            # Face already exists - treat as success (can be HTTP 200 or HTTP 400)
+            if status_code == 6 and sub_status_code == "deviceUserAlreadyExistFace":
+                return SyncResult(SyncResultStatus.SUCCESS, "Face image already exists on device", "photo")
+            
+            # Other ISAPI error
+            error_msg = data.get("errorMsg", "") or data.get("statusString", "")
             return SyncResult(
                 SyncResultStatus.PARTIAL,
-                f"Face image failed: HTTP {response.status_code} - {response.text[:200]}",
+                f"Face image failed: statusCode={status_code}, subStatusCode={sub_status_code}, errorMsg={error_msg}",
                 "photo"
             )
+        except Exception:
+            # If we can't parse JSON, check HTTP status
+            if response.status_code == 200:
+                return SyncResult(SyncResultStatus.SUCCESS, "Face image added successfully", "photo")
+            else:
+                # Photo failure is non-fatal (partial success)
+                return SyncResult(
+                    SyncResultStatus.PARTIAL,
+                    f"Face image failed: HTTP {response.status_code} - {response.text[:200]}",
+                    "photo"
+                )
         
     except requests.exceptions.Timeout:
         return SyncResult(
@@ -411,35 +435,41 @@ async def update_face_image_to_device(device: dict, angajat: dict, supabase_url:
         print(f"  Headers: {dict(response.headers)}")
         print(f"  Body: {response.text[:500]}")
 
-        # Parse response
-        if response.status_code == 200:
-            try:
-                data = response.json()
-                status_code = data.get("statusCode")
-                status_string = data.get("statusString", "")
-                sub_status = data.get("subStatusCode", "")
-                if status_code == 1 and (sub_status == "ok" or status_string.lower() == "ok"):
-                    return SyncResult(SyncResultStatus.SUCCESS, "Face image updated successfully (PUT)", "photo")
-                # Non-OK JSON payload, treat as partial to allow fallback
+        # Try to parse JSON body even for non-200 responses
+        # Some devices return HTTP 400 with error details in JSON
+        try:
+            data = response.json()
+            status_code = data.get("statusCode")
+            status_string = data.get("statusString", "")
+            sub_status = data.get("subStatusCode", "")
+            
+            # Success (HTTP 200)
+            if status_code == 1 and (sub_status == "ok" or status_string.lower() == "ok"):
+                return SyncResult(SyncResultStatus.SUCCESS, "Face image updated successfully (PUT)", "photo")
+            
+            # Check for "face already exists" type errors - treat as success for PUT
+            # (If face exists, PUT should update it, but some devices might return this)
+            if status_code == 6 and ("alreadyExist" in sub_status or "alreadyExist" in status_string):
+                return SyncResult(SyncResultStatus.SUCCESS, "Face image already exists on device (PUT)", "photo")
+            
+            # Other ISAPI error - treat as partial to allow fallback
+            error_msg = data.get("errorMsg", "") or status_string
+            return SyncResult(
+                SyncResultStatus.PARTIAL,
+                f"Face image update failed: statusCode={status_code}, subStatusCode={sub_status}, statusString={status_string}, errorMsg={error_msg}",
+                "photo"
+            )
+        except Exception as exc:
+            # If we can't parse JSON, check HTTP status
+            if response.status_code == 200:
+                return SyncResult(SyncResultStatus.SUCCESS, "Face image updated successfully (PUT)", "photo")
+            else:
+                # Non-200 HTTP codes - partial to allow fallback
                 return SyncResult(
                     SyncResultStatus.PARTIAL,
-                    f"Face image update failed: statusCode={status_code}, subStatusCode={sub_status}, statusString={status_string}",
+                    f"Face image update failed: HTTP {response.status_code} - {response.text[:200]}",
                     "photo"
                 )
-            except Exception as exc:
-                # JSON parse error on 200 - treat as partial to allow fallback
-                return SyncResult(
-                    SyncResultStatus.PARTIAL,
-                    f"Face image update: HTTP 200 but failed to parse response: {exc}",
-                    "photo"
-                )
-
-        # Non-200 HTTP codes - partial to allow fallback
-        return SyncResult(
-            SyncResultStatus.PARTIAL,
-            f"Face image update failed: HTTP {response.status_code} - {response.text[:200]}",
-            "photo"
-        )
 
     except requests.exceptions.Timeout:
         return SyncResult(
