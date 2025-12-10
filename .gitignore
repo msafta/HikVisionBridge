@@ -45,6 +45,9 @@ faces/
 # Config (ignore for now)
 config/
 
+# Documentation
+docs/
+
 # Locks and misc
 *.pid
 *.lock
