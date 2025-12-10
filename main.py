@@ -1382,12 +1382,13 @@ async def catch_all_post(request: Request, full_path: str):
     content_type = request.headers.get("content-type", "")
     
     # Process event using events module
-    process_event_request(
+    await process_event_request(
         body=body,
         content_type=content_type,
         path=full_path,
         event_logger=_EVENT_LOGGER.get(),
-        access_logger=_ACCESS_LOGGER.get()
+        access_logger=_ACCESS_LOGGER.get(),
+        supabase_client=_SUPABASE_CLIENT
     )
     
     return PlainTextResponse("OK")

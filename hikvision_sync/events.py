@@ -6,7 +6,10 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import date
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .supabase_client import SupabaseClient
 
 
 class DailyLogger:
@@ -132,12 +135,13 @@ def parse_request_body(body: bytes, content_type: str, logger: logging.Logger):
     return None
 
 
-def process_event_request(
+async def process_event_request(
     body: bytes,
     content_type: str,
     path: str,
     event_logger: logging.Logger,
-    access_logger: Optional[logging.Logger] = None
+    access_logger: Optional[logging.Logger] = None,
+    supabase_client: Optional["SupabaseClient"] = None
 ) -> dict:
     """
     Process incoming event request from Hikvision device.
@@ -148,9 +152,10 @@ def process_event_request(
         path: Request path
         event_logger: Logger for all events
         access_logger: Optional logger for access events only
+        supabase_client: Optional Supabase client for saving access events
     
     Returns:
-        dict with processing result
+        dict with processing result including save_status
     """
     # Decode path if percent-encoded
     decoded_path = urllib.parse.unquote(path)
@@ -163,15 +168,42 @@ def process_event_request(
     # Parse request body
     parsed = parse_request_body(body, content_type, event_logger)
     
-    # Check if it's an access event and log to access logger if provided
-    if parsed and is_access_event(parsed):
+    # Check if it's an access event
+    is_access = parsed and is_access_event(parsed) if parsed else False
+    save_status = None
+    
+    if is_access:
+        # Log to access logger if provided
         if access_logger:
             access_logger.info(f"Received POST to path: {decoded_path}")
             access_logger.info(f"Content-Type: {content_type}")
             access_logger.info(decoded_body)
+        
+        # Save to Supabase if client is provided
+        if supabase_client and parsed:
+            try:
+                result = await supabase_client.save_access_event(parsed)
+                if result.get("status") == "success":
+                    save_status = "success"
+                    event_logger.info(f"Successfully saved access event to Supabase")
+                else:
+                    save_status = "error"
+                    error_type = result.get("error_type", "Unknown")
+                    error_msg = result.get("error", "Unknown error")
+                    event_logger.error(
+                        f"Failed to save access event to Supabase: {error_type} - {error_msg}. "
+                        f"Event data: {json.dumps(parsed, default=str)[:500]}"
+                    )
+            except Exception as exc:
+                save_status = "error"
+                event_logger.error(
+                    f"Unexpected error saving access event to Supabase: {exc}. "
+                    f"Event data: {json.dumps(parsed, default=str)[:500]}"
+                )
     
     return {
         "parsed": parsed,
-        "is_access_event": parsed and is_access_event(parsed) if parsed else False
+        "is_access_event": is_access,
+        "save_status": save_status
     }
 

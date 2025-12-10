@@ -102,4 +102,62 @@ class SupabaseClient:
             response.raise_for_status()
             result = response.json()
             return result.get("data", result)
+    
+    async def save_access_event(self, event_data: dict) -> dict:
+        """
+        Save access event to Supabase via Edge Function.
+        
+        Args:
+            event_data: Complete event JSON dict (as parsed from device request)
+        
+        Returns:
+            dict with response data from Edge Function, or error information if failed
+        
+        Note:
+            This method uses a different Edge Function endpoint than other methods.
+            Errors are caught and returned as dict (non-blocking) rather than raised.
+        """
+        # Hardcoded endpoint URL and API key for pontaj event saving
+        endpoint_url = "https://xnjbjmbjyyuqjcflzigg.supabase.co/functions/v1/pontaj-adauga-eveniment"
+        api_key = "sk_pontaj_prod_LsoJQrkbi40ov3dWhLqDHKZeOkAK4MBX"
+        
+        headers = {
+            "X-API-Key": api_key,
+            "Content-Type": "application/json",
+        }
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    endpoint_url,
+                    headers=headers,
+                    json=event_data,
+                    timeout=10.0,
+                )
+                response.raise_for_status()
+                result = response.json()
+                return {"status": "success", "data": result}
+        except httpx.HTTPStatusError as exc:
+            # HTTP error (4xx, 5xx)
+            return {
+                "status": "error",
+                "error_type": "HTTPStatusError",
+                "status_code": exc.response.status_code,
+                "error": str(exc),
+                "response_text": exc.response.text if exc.response else None,
+            }
+        except httpx.RequestError as exc:
+            # Network error (timeout, connection error, etc.)
+            return {
+                "status": "error",
+                "error_type": "RequestError",
+                "error": str(exc),
+            }
+        except Exception as exc:
+            # Any other unexpected error
+            return {
+                "status": "error",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
 
