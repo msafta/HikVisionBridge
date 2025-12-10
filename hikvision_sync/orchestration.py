@@ -2,7 +2,7 @@
 
 from typing import Optional
 from .models import SyncResult, SyncResultStatus
-from .isapi_client import create_person_on_device, add_face_image_to_device
+from .isapi_client import create_person_on_device, add_face_image_to_device, update_face_image_to_device
 
 
 async def sync_angajat_to_device(
@@ -151,4 +151,87 @@ async def sync_photo_only_to_device(
     
     # Return the photo result directly
     return photo_result
+
+
+async def update_photo_to_device(
+    angajat: dict,
+    device: dict,
+    supabase_url: Optional[str] = None
+) -> SyncResult:
+    """
+    Update face photo on one Hikvision device with PUT fallback to POST.
+    
+    This attempts to update an existing face image using PUT request.
+    If PUT fails, it falls back to POST (create) to ensure the photo is synced.
+    Assumes the person already exists on the device.
+    
+    Steps:
+    1. Validate employee_no exists
+    2. Validate foto_fata_url exists
+    3. Attempt PUT update via update_face_image_to_device()
+    4. If PUT succeeds → return SUCCESS
+    5. If PUT fails → fallback to POST via add_face_image_to_device()
+    
+    Args:
+        angajat: Angajat dict with biometrie data (must include employee_no and foto_fata_url)
+        device: Device dict with ip_address, port, username, password_encrypted
+        supabase_url: Optional Supabase URL for constructing full image URLs
+    
+    Returns:
+        SyncResult with status:
+        - SUCCESS: Photo updated/created successfully (PUT succeeded OR POST fallback succeeded)
+        - SKIPPED: Missing employee_no or foto_fata_url
+        - PARTIAL: Both PUT and POST failed (non-fatal)
+        - FATAL: Device error (auth/network/timeout) - should not occur but handle if needed
+    """
+    # Step 1: Validate employee_no exists
+    biometrie = angajat.get("biometrie", {})
+    employee_no = biometrie.get("employee_no")
+    
+    if not employee_no:
+        return SyncResult(
+            SyncResultStatus.SKIPPED,
+            "Missing employee_no - cannot update photo without employee number",
+            "validation"
+        )
+    
+    # Step 2: Validate foto_fata_url exists
+    foto_fata_url = biometrie.get("foto_fata_url")
+    
+    if not foto_fata_url:
+        return SyncResult(
+            SyncResultStatus.SKIPPED,
+            "Missing foto_fata_url - cannot update photo without photo URL",
+            "validation"
+        )
+    
+    # Step 3: Attempt PUT update
+    put_result = await update_face_image_to_device(device, angajat, supabase_url)
+    
+    # Step 4: If PUT succeeded, return SUCCESS
+    if put_result.status == SyncResultStatus.SUCCESS:
+        return SyncResult(
+            SyncResultStatus.SUCCESS,
+            "Face image updated successfully via PUT",
+            "photo"
+        )
+    
+    # Step 5: PUT failed - fallback to POST (create)
+    # Note: PUT failures return PARTIAL status, so we fallback to POST
+    post_result = await add_face_image_to_device(device, angajat, supabase_url)
+    
+    # Return POST result (SUCCESS if fallback worked, PARTIAL if both failed)
+    if post_result.status == SyncResultStatus.SUCCESS:
+        return SyncResult(
+            SyncResultStatus.SUCCESS,
+            f"PUT update failed, but photo created successfully via POST fallback. PUT error: {put_result.message}",
+            "photo"
+        )
+    else:
+        # Both PUT and POST failed
+        return SyncResult(
+            SyncResultStatus.PARTIAL,
+            f"Both PUT update and POST create failed. PUT error: {put_result.message}. POST error: {post_result.message}",
+            "photo"
+        )
 
