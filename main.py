@@ -773,25 +773,24 @@ async def sync_all_to_all_devices(
             "skipped": 3,        # Total skipped (missing employee_no)
             "fatal": 0           # Total fatal errors
         },
-        "per_angajat": [
+        "employeeResults": [
             {
-                "angajat_id": "...",
-                "angajat_name": "John Doe",
-                "summary": {
-                    "success": 2,
-                    "partial": 0,
-                    "skipped": 0,
-                    "fatal": 1
-                },
-                "per_device": [
+                "angajatId": "...",
+                "angajatName": "John Doe",
+                "success": true,      # true if at least one device succeeded and no fatal errors
+                "skipped": false,     # true if all devices were skipped
+                "error": null,        # null if success, otherwise first error message
+                "deviceResults": [
                     {
-                        "device_id": "...",
-                        "device_ip": "192.168.1.100",
-                        "status": "success",
-                        "message": "...",
-                        "step": "complete"
+                        "deviceId": "uuid1",
+                        "success": true,
+                        "error": null
                     },
-                    ...
+                    {
+                        "deviceId": "uuid2",
+                        "success": false,
+                        "error": "Connection timeout"
+                    }
                 ]
             },
             ...
@@ -822,7 +821,7 @@ async def sync_all_to_all_devices(
             }
         
         # Initialize result aggregation
-        per_angajat_results = []
+        employee_results = []
         total_summary = {
             "total_angajati": len(angajati),
             "total_devices": len(devices),
@@ -841,7 +840,7 @@ async def sync_all_to_all_devices(
             angajat_name = f"{angajat.get('nume', '')} {angajat.get('prenume', '')}".strip() or angajat.get("nume_complet", "Unknown")
             
             # Initialize per-angajat result
-            angajat_per_device_results = []
+            device_results = []
             angajat_summary = {
                 "success": 0,
                 "partial": 0,
@@ -857,13 +856,14 @@ async def sync_all_to_all_devices(
                 # Sync to this device (handles missing photo URLs automatically)
                 result = await sync_angajat_to_device(angajat, device, supabase_url)
                 
-                # Record result
-                angajat_per_device_results.append({
-                    "device_id": device_id,
-                    "device_ip": device_ip,
-                    "status": result.status.value,
-                    "message": result.message,
-                    "step": result.step
+                # Record device result in new format
+                device_success = result.status.value in ("success", "partial")
+                device_error = None if device_success else result.message
+                
+                device_results.append({
+                    "deviceId": device_id,
+                    "success": device_success,
+                    "error": device_error
                 })
                 
                 # Update per-angajat summary
@@ -876,12 +876,33 @@ async def sync_all_to_all_devices(
                 if device != devices[-1]:
                     await rate_limit_delay(1.0)
             
-            # Record per-angajat result
-            per_angajat_results.append({
-                "angajat_id": angajat_id,
-                "angajat_name": angajat_name,
-                "summary": angajat_summary,
-                "per_device": angajat_per_device_results
+            # Determine overall employee result status
+            # success: true if at least one device succeeded and no fatal errors
+            # skipped: true if all devices were skipped
+            # error: first error message if any failures occurred
+            has_success = angajat_summary.get("success", 0) > 0 or angajat_summary.get("partial", 0) > 0
+            has_fatal = angajat_summary.get("fatal", 0) > 0
+            all_skipped = angajat_summary.get("skipped", 0) == len(devices)
+            
+            employee_success = has_success and not has_fatal
+            employee_skipped = all_skipped
+            
+            # Find first error message from device results
+            employee_error = None
+            if not employee_success and not employee_skipped:
+                for dr in device_results:
+                    if dr["error"]:
+                        employee_error = dr["error"]
+                        break
+            
+            # Record employee result in new format
+            employee_results.append({
+                "angajatId": angajat_id,
+                "angajatName": angajat_name,
+                "success": employee_success,
+                "skipped": employee_skipped,
+                "error": employee_error,
+                "deviceResults": device_results
             })
             
             # Add delay between angajati (except after the last one)
@@ -892,7 +913,7 @@ async def sync_all_to_all_devices(
         return {
             "status": "ok",
             "summary": total_summary,
-            "per_angajat": per_angajat_results
+            "employeeResults": employee_results
         }
         
     except Exception as exc:

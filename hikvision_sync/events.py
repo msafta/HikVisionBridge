@@ -190,8 +190,12 @@ async def process_event_request(
                     save_status = "error"
                     error_type = result.get("error_type", "Unknown")
                     error_msg = result.get("error", "Unknown error")
+                    response_text = result.get("response_text", "")
+                    status_code = result.get("status_code", "")
                     event_logger.error(
-                        f"Failed to save access event to Supabase: {error_type} - {error_msg}. "
+                        f"Failed to save access event to Supabase: {error_type} - {error_msg}"
+                        f"{f' (Status: {status_code})' if status_code else ''}"
+                        f"{f'. Response: {response_text[:200]}' if response_text else ''}. "
                         f"Event data: {json.dumps(parsed, default=str)[:500]}"
                     )
             except Exception as exc:
