@@ -69,7 +69,7 @@ def extract_event(parsed):
 
 
 def is_access_event(parsed) -> bool:
-    """Check if parsed event is an access control event (major=5, sub=75)."""
+    """Check if parsed event is an access control event (major=5, sub=75 or 76)."""
     event = extract_event(parsed)
     if not event:
         return False
@@ -78,7 +78,7 @@ def is_access_event(parsed) -> bool:
         sub = int(event.get("subEventType"))
     except (TypeError, ValueError):
         return False
-    return major == 5 and sub == 75
+    return major == 5 and sub in (75, 76)
 
 
 def extract_boundary(content_type: str) -> Optional[str]:
