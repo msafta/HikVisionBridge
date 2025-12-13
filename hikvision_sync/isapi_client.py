@@ -40,15 +40,18 @@ def _build_person_payload(angajat: dict) -> dict:
             "Valid": {
                 "enable": is_active,
                 "beginTime": "2025-10-10T00:00:00",
-                "endTime": "2037-12-31T23:59:59"
+                "endTime": "2037-12-31T23:59:59",
+                "timeType": "local"
             },
             "doorRight": "1",
             "RightPlan": [
                 {
                     "doorNo": 1,
-                    "plamTemplateNo": "1"
+                    "planTemplateNo": "1"
                 }
-            ]
+            ],
+            "userVerifyMode": "face",
+            "localUIRight": False
         }
     }
 
