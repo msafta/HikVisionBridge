@@ -1,5 +1,7 @@
 """Supabase client helpers for fetching data via Edge Function."""
 
+import json
+import logging
 import os
 import httpx
 from typing import List, Optional
@@ -121,17 +123,23 @@ class SupabaseClient:
         # Load endpoint URL and API key from environment variables
         endpoint_url = os.getenv(
             "SUPABASE_EVENT_FUNCTION_URL",
-            "https://xnjbjmbjyyuqjcflzigg.supabase.co/functions/v1/pontaj-adauga-eveniment"
+            ""
         )
         api_key = os.getenv(
             "SUPABASE_EVENT_FUNCTION_API_KEY",
-            "sk_pontaj_prod_LsoJQrkbi40ov3dWhLqDHKZeOkAK4MBX"
+            ""
         )
         
         headers = {
             "X-API-Key": api_key,
             "Content-Type": "application/json",
         }
+        
+        # Console output for testing
+        api_key_masked = f"{api_key[:10]}...{api_key[-4:]}" if len(api_key) > 14 else "***"
+        print(f"INFO:     [SUPABASE EVENT CALL] POST {endpoint_url}")
+        print(f"INFO:     [SUPABASE EVENT CALL] API Key: {api_key_masked}")
+        print(f"INFO:     [SUPABASE EVENT CALL] Event data: {json.dumps(event_data, default=str)[:200]}")
         
         try:
             async with httpx.AsyncClient() as client:
@@ -141,11 +149,16 @@ class SupabaseClient:
                     json=event_data,
                     timeout=10.0,
                 )
+                print(f"INFO:     [SUPABASE EVENT CALL] Response: {response.status_code} {response.reason_phrase}")
+                print(f"INFO:     [SUPABASE EVENT CALL] Response body: {response.text[:200]}")
                 response.raise_for_status()
                 result = response.json()
+                print(f"INFO:     [SUPABASE EVENT CALL] Success - Event saved to database")
                 return {"status": "success", "data": result}
         except httpx.HTTPStatusError as exc:
             # HTTP error (4xx, 5xx)
+            print(f"ERROR:    [SUPABASE EVENT CALL] HTTP Error {exc.response.status_code}: {exc}")
+            print(f"ERROR:    [SUPABASE EVENT CALL] Response: {exc.response.text[:200] if exc.response else 'No response'}")
             return {
                 "status": "error",
                 "error_type": "HTTPStatusError",
@@ -155,6 +168,7 @@ class SupabaseClient:
             }
         except httpx.RequestError as exc:
             # Network error (timeout, connection error, etc.)
+            print(f"ERROR:    [SUPABASE EVENT CALL] Request Error: {exc}")
             return {
                 "status": "error",
                 "error_type": "RequestError",
@@ -162,6 +176,7 @@ class SupabaseClient:
             }
         except Exception as exc:
             # Any other unexpected error
+            print(f"ERROR:    [SUPABASE EVENT CALL] Unexpected Error: {exc}")
             return {
                 "status": "error",
                 "error_type": type(exc).__name__,
