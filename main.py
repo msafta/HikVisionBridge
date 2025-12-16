@@ -1,4 +1,5 @@
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -55,6 +56,75 @@ if isinstance(_ALLOWED_ORIGINS, str):
     _ALLOWED_ORIGINS = [origin.strip() for origin in _ALLOWED_ORIGINS.split(",") if origin.strip()]
 if not _ALLOWED_ORIGINS:
     _ALLOWED_ORIGINS = ["http://localhost:3000"]
+
+# VPN/IP Whitelist configuration for device events
+_VPN_SUBNET = _get_config_value("VPN_SUBNET", "vpn_subnet", "")
+_ALLOWED_EVENT_IPS = _get_config_value("ALLOWED_EVENT_IPS", "allowed_event_ips", "")
+
+# Parse allowed IP ranges
+_ALLOWED_IP_NETWORKS = []
+if _VPN_SUBNET:
+    try:
+        _ALLOWED_IP_NETWORKS.append(ipaddress.ip_network(_VPN_SUBNET, strict=False))
+    except ValueError:
+        logging.warning(f"Invalid VPN_SUBNET: {_VPN_SUBNET}")
+
+if _ALLOWED_EVENT_IPS:
+    for ip_range in _ALLOWED_EVENT_IPS.split(","):
+        ip_range = ip_range.strip()
+        if ip_range:
+            try:
+                _ALLOWED_IP_NETWORKS.append(ipaddress.ip_network(ip_range, strict=False))
+            except ValueError:
+                logging.warning(f"Invalid IP range in ALLOWED_EVENT_IPS: {ip_range}")
+
+
+def _is_ip_whitelisted(client_ip: str) -> bool:
+    """
+    Check if client IP is in the whitelisted VPN subnet or allowed IP ranges.
+    
+    Args:
+        client_ip: Client IP address as string
+        
+    Returns:
+        True if IP is whitelisted, False otherwise
+    """
+    if not _ALLOWED_IP_NETWORKS:
+        # If no whitelist configured, allow all (backward compatible for dev)
+        return True
+    
+    try:
+        ip = ipaddress.ip_address(client_ip)
+        for network in _ALLOWED_IP_NETWORKS:
+            if ip in network:
+                return True
+    except ValueError:
+        # Invalid IP address
+        return False
+    
+    return False
+
+
+def _get_client_ip(request: Request) -> str:
+    """
+    Extract client IP from request, handling X-Forwarded-For header if behind proxy.
+    
+    Args:
+        request: FastAPI Request object
+        
+    Returns:
+        Client IP address as string
+    """
+    # Check X-Forwarded-For header (if behind proxy/load balancer)
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        # X-Forwarded-For can contain multiple IPs, take the first one
+        client_ip = forwarded_for.split(",")[0].strip()
+        return client_ip
+    
+    # Fall back to direct client IP
+    return request.client.host if request.client else "unknown"
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -831,6 +901,16 @@ _ACCESS_LOGGER = DailyLogger("hikvision_access", "Access Log {date}.log", _LOG_D
 @app.post("/{full_path:path}")
 async def catch_all_post(request: Request, full_path: str):
     """Catch-all endpoint for receiving Hikvision device events."""
+    # Check IP whitelist
+    client_ip = _get_client_ip(request)
+    if not _is_ip_whitelisted(client_ip):
+        event_logger = _EVENT_LOGGER.get()
+        event_logger.warning(f"Blocked device event from non-whitelisted IP: {client_ip}, path: {full_path}")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: IP address not whitelisted"
+        )
+    
     body = await request.body()
     content_type = request.headers.get("content-type", "")
     
