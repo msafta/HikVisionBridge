@@ -267,8 +267,7 @@ def env_test():
 @app.post("/api/hikvision/sync-angajat-all-devices")
 @limiter.limit("60/minute")
 async def sync_angajat_all_devices(
-    request: Request,
-    body: dict
+    request: Request
 ):
     """
     Sync one Angajat to all active devices.
@@ -303,6 +302,19 @@ async def sync_angajat_all_devices(
         ]
     }
     """
+    # Read and print raw request body
+    body = await request.body()
+    print("RAW BODY:", body)
+    
+    # Parse JSON body
+    try:
+        body = json.loads(body)
+    except json.JSONDecodeError:
+        return {
+            "status": "error",
+            "error": "Invalid JSON in request body"
+        }
+    
     if not _SUPABASE_CLIENT:
         return {
             "status": "error",
