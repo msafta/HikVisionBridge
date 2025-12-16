@@ -1,5 +1,6 @@
 """Supabase client helpers for fetching data via Edge Function."""
 
+import os
 import httpx
 from typing import List, Optional
 
@@ -117,9 +118,15 @@ class SupabaseClient:
             This method uses a different Edge Function endpoint than other methods.
             Errors are caught and returned as dict (non-blocking) rather than raised.
         """
-        # Hardcoded endpoint URL and API key for pontaj event saving
-        endpoint_url = "https://xnjbjmbjyyuqjcflzigg.supabase.co/functions/v1/pontaj-adauga-eveniment"
-        api_key = "sk_pontaj_prod_LsoJQrkbi40ov3dWhLqDHKZeOkAK4MBX"
+        # Load endpoint URL and API key from environment variables
+        endpoint_url = os.getenv(
+            "SUPABASE_EVENT_FUNCTION_URL",
+            "https://xnjbjmbjyyuqjcflzigg.supabase.co/functions/v1/pontaj-adauga-eveniment"
+        )
+        api_key = os.getenv(
+            "SUPABASE_EVENT_FUNCTION_API_KEY",
+            "sk_pontaj_prod_LsoJQrkbi40ov3dWhLqDHKZeOkAK4MBX"
+        )
         
         headers = {
             "X-API-Key": api_key,
