@@ -32,6 +32,17 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Add security headers to all responses."""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    return response
+
+
 _ROOT_DIR = Path(__file__).resolve().parent
 _LOG_DIR = _ROOT_DIR / "logs"
 _APP_CONFIG_PATH = _ROOT_DIR / "config" / "app_settings.json"
