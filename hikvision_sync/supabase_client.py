@@ -138,7 +138,6 @@ class SupabaseClient:
         # Console output for testing
         api_key_masked = f"{api_key[:10]}...{api_key[-4:]}" if len(api_key) > 14 else "***"
         print(f"INFO:     [SUPABASE EVENT CALL] POST {endpoint_url}")
-        print(f"INFO:     [SUPABASE EVENT CALL] API Key: {api_key_masked}")
         print(f"INFO:     [SUPABASE EVENT CALL] Event data: {json.dumps(event_data, default=str)[:200]}")
         
         try:
