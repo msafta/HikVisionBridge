@@ -260,6 +260,7 @@ def env_test():
     return {
         "env": os.getenv("APP_ENV"),
         "vpn_subnet": os.getenv("VPN_SUBNET"),
+        "allowed_origins": os.getenv("ALLOWED_ORIGINS"),
     }
 
 
