@@ -13,6 +13,9 @@ from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from jwt import PyJWKClient
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from hikvision_sync.supabase_client import SupabaseClient
 from hikvision_sync.isapi_client import create_person_on_device, add_face_image_to_device, rate_limit_delay
@@ -23,6 +26,11 @@ from hikvision_sync.events import DailyLogger, process_event_request
 load_dotenv()
 
 app = FastAPI()
+
+# Initialize rate limiter
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 _ROOT_DIR = Path(__file__).resolve().parent
 _LOG_DIR = _ROOT_DIR / "logs"
@@ -236,7 +244,9 @@ async def require_auth(request: Request):
 
 
 @app.post("/api/hikvision/sync-angajat-all-devices")
+@limiter.limit("60/minute")
 async def sync_angajat_all_devices(
+    request: Request,
     body: dict
 ):
     """
@@ -357,7 +367,9 @@ async def sync_angajat_all_devices(
 
 
 @app.post("/api/hikvision/delete-user")
+@limiter.limit("60/minute")
 async def delete_user(
+    request: Request,
     body: dict
 ):
     """
@@ -474,7 +486,9 @@ async def delete_user(
 
 
 @app.post("/api/hikvision/sync-all-to-all-devices")
+@limiter.limit("60/minute")
 async def sync_all_to_all_devices(
+    request: Request,
     body: dict
 ):
     """
@@ -652,7 +666,9 @@ async def sync_all_to_all_devices(
 
 
 @app.post("/api/hikvision/sync-angajat-photo-only")
+@limiter.limit("60/minute")
 async def sync_angajat_photo_only(
+    request: Request,
     body: dict
 ):
     """
@@ -773,7 +789,9 @@ async def sync_angajat_photo_only(
 
 
 @app.post("/api/hikvision/update-angajat-photo")
+@limiter.limit("60/minute")
 async def update_angajat_photo(
+    request: Request,
     body: dict
 ):
     """
@@ -899,6 +917,7 @@ _EVENT_LOGGER = DailyLogger("hikvision_events", "hikvision_events_{date}.log", _
 _ACCESS_LOGGER = DailyLogger("hikvision_access", "Access Log {date}.log", _LOG_DIR, subfolder="access")
 
 @app.post("/{full_path:path}")
+@limiter.limit("100/minute")
 async def catch_all_post(request: Request, full_path: str):
     """Catch-all endpoint for receiving Hikvision device events."""
     # Check IP whitelist
