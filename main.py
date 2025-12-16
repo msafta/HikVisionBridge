@@ -254,6 +254,15 @@ async def require_auth(request: Request):
     return payload
 
 
+@app.get("/env-test")
+def env_test():
+    """Test endpoint to verify environment variables are loaded correctly."""
+    return {
+        "env": os.getenv("APP_ENV"),
+        "vpn_subnet": os.getenv("VPN_SUBNET"),
+    }
+
+
 @app.post("/api/hikvision/sync-angajat-all-devices")
 @limiter.limit("60/minute")
 async def sync_angajat_all_devices(
