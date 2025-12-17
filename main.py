@@ -369,8 +369,8 @@ async def sync_angajat_all_devices(
             "fatal": 0
         }
         
-        # Get Supabase URL for constructing image URLs
-        supabase_url = _APP_CONFIG.get("supabase_url")
+        # Get Supabase URL for constructing image URLs (from .env, not config file)
+        supabase_url = _get_config_value("SUPABASE_URL", "supabase_url")
         
         # Sync to each device sequentially (using existing sync_angajat_to_device function)
         for device in devices:
@@ -617,8 +617,8 @@ async def sync_all_to_all_devices(
             "fatal": 0
         }
         
-        # Get Supabase URL for constructing image URLs
-        supabase_url = _APP_CONFIG.get("supabase_url")
+        # Get Supabase URL for constructing image URLs (from .env, not config file)
+        supabase_url = _get_config_value("SUPABASE_URL", "supabase_url")
         
         # Sync each angajat to all devices sequentially
         for angajat in angajati:
@@ -791,8 +791,8 @@ async def sync_angajat_photo_only(
             "fatal": 0
         }
         
-        # Get Supabase URL for constructing image URLs
-        supabase_url = _APP_CONFIG.get("supabase_url")
+        # Get Supabase URL for constructing image URLs (from .env, not config file)
+        supabase_url = _get_config_value("SUPABASE_URL", "supabase_url")
         
         # Sync photo to each device sequentially (using sync_photo_only_to_device function)
         for device in devices:
@@ -915,8 +915,8 @@ async def update_angajat_photo(
             "fatal": 0
         }
         
-        # Get Supabase URL for constructing image URLs
-        supabase_url = _APP_CONFIG.get("supabase_url")
+        # Get Supabase URL for constructing image URLs (from .env, not config file)
+        supabase_url = _get_config_value("SUPABASE_URL", "supabase_url")
         
         # Update photo to each device sequentially (using update_photo_to_device function)
         for device in devices:
