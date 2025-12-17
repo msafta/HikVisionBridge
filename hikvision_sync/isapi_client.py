@@ -2,10 +2,14 @@
 
 import base64
 import json
+import logging
 import requests
 import httpx
 from typing import Optional
 from .models import SyncResult, SyncResultStatus
+
+# Set up logger for console output
+logger = logging.getLogger(__name__)
 
 
 async def _download_image_to_base64(image_url: str) -> str:
@@ -871,17 +875,29 @@ async def add_face_image_to_device_with_data(device: dict, angajat: dict, supaba
         # According to ISAPI docs:
         # - Parameter name "faceURL" with Content-Type "application/json" contains the JSON message
         # - Parameter name "img" with Content-Type "image/jpeg" contains the binary image data
+        json_payload_str = json.dumps(payload)
         files = {
-            'faceURL': (None, json.dumps(payload), 'application/json'),
+            'faceURL': (None, json_payload_str, 'application/json'),
             'img': ('facePic.jpg', image_data, 'image/jpeg')
         }
+        
+        # Debug logging for multipart request
+        logger.info("DEBUG Multipart Request Details:")
+        logger.info(f"  JSON Payload (faceURL parameter): {json_payload_str}")
+        logger.info(f"  JSON Payload length: {len(json_payload_str)} bytes")
+        logger.info(f"  Image file name: facePic.jpg")
+        logger.info(f"  Image file size: {len(image_data)} bytes")
+        logger.info(f"  Image file first 20 bytes (hex): {image_data[:20].hex()}")
+        logger.info(f"  Image file Content-Type: image/jpeg")
+        logger.info(f"  Total multipart size (approx): {len(json_payload_str) + len(image_data)} bytes")
         
         # Make request with Digest Auth using multipart/form-data
         headers = {
             "User-Agent": "Hikvision-ISAPI-Client/1.0",
         }
-        print(f"  Headers: {headers}")
-        print(f"  Using multipart/form-data format")
+        logger.info(f"  Request Headers: {headers}")
+        logger.info(f"  Using multipart/form-data format")
+        logger.info(f"  Sending POST request to: {url}")
         
         response = requests.post(
             url,
@@ -891,10 +907,13 @@ async def add_face_image_to_device_with_data(device: dict, angajat: dict, supaba
             timeout=15.0,
         )
         
-        print("DEBUG Response (Face - Direct Data):")
-        print(f"  Status: {response.status_code}")
-        print(f"  Headers: {dict(response.headers)}")
-        print(f"  Body: {response.text[:500]}")
+        logger.info("DEBUG Response (Face - Multipart Form Data):")
+        logger.info(f"  Status Code: {response.status_code}")
+        logger.info(f"  Response Headers: {dict(response.headers)}")
+        logger.info(f"  Response Content-Type: {response.headers.get('Content-Type', 'N/A')}")
+        logger.info(f"  Response Content-Length: {response.headers.get('Content-Length', 'N/A')}")
+        logger.info(f"  Response Body (first 1000 chars): {response.text[:1000]}")
+        logger.info(f"  Response Body (full length): {len(response.text)} characters")
         
         # Try to parse JSON body even for non-200 responses
         # Some devices return HTTP 400 with "deviceUserAlreadyExistFace" in the body
@@ -1038,17 +1057,29 @@ async def update_face_image_to_device_with_data(device: dict, angajat: dict, sup
         # According to ISAPI docs:
         # - Parameter name "faceURL" with Content-Type "application/json" contains the JSON message
         # - Parameter name "img" with Content-Type "image/jpeg" contains the binary image data
+        json_payload_str = json.dumps(payload)
         files = {
-            'faceURL': (None, json.dumps(payload), 'application/json'),
+            'faceURL': (None, json_payload_str, 'application/json'),
             'img': ('facePic.jpg', image_data, 'image/jpeg')
         }
+
+        # Debug logging for multipart request
+        logger.info("DEBUG Multipart Request Details:")
+        logger.info(f"  JSON Payload (faceURL parameter): {json_payload_str}")
+        logger.info(f"  JSON Payload length: {len(json_payload_str)} bytes")
+        logger.info(f"  Image file name: facePic.jpg")
+        logger.info(f"  Image file size: {len(image_data)} bytes")
+        logger.info(f"  Image file first 20 bytes (hex): {image_data[:20].hex()}")
+        logger.info(f"  Image file Content-Type: image/jpeg")
+        logger.info(f"  Total multipart size (approx): {len(json_payload_str) + len(image_data)} bytes")
 
         # Make request with Digest Auth using multipart/form-data
         headers = {
             "User-Agent": "Hikvision-ISAPI-Client/1.0",
         }
-        print(f"  Headers: {headers}")
-        print(f"  Using multipart/form-data format")
+        logger.info(f"  Request Headers: {headers}")
+        logger.info(f"  Using multipart/form-data format")
+        logger.info(f"  Sending PUT request to: {url}")
 
         response = requests.put(
             url,
@@ -1058,10 +1089,13 @@ async def update_face_image_to_device_with_data(device: dict, angajat: dict, sup
             timeout=15.0,
         )
 
-        print("DEBUG Response (Face Update - PUT - Direct Data):")
-        print(f"  Status: {response.status_code}")
-        print(f"  Headers: {dict(response.headers)}")
-        print(f"  Body: {response.text[:500]}")
+        logger.info("DEBUG Response (Face Update - PUT - Multipart Form Data):")
+        logger.info(f"  Status Code: {response.status_code}")
+        logger.info(f"  Response Headers: {dict(response.headers)}")
+        logger.info(f"  Response Content-Type: {response.headers.get('Content-Type', 'N/A')}")
+        logger.info(f"  Response Content-Length: {response.headers.get('Content-Length', 'N/A')}")
+        logger.info(f"  Response Body (first 1000 chars): {response.text[:1000]}")
+        logger.info(f"  Response Body (full length): {len(response.text)} characters")
 
         # Try to parse JSON body even for non-200 responses
         # Some devices return HTTP 400 with error details in JSON

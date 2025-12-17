@@ -30,6 +30,15 @@ from hikvision_sync.events import DailyLogger, process_event_request
 # Load environment variables from .env file
 load_dotenv()
 
+# Configure logging to output to console
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()  # Output to console
+    ]
+)
+
 app = FastAPI()
 
 # Initialize rate limiter
