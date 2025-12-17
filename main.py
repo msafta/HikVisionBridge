@@ -19,7 +19,12 @@ from slowapi.util import get_remote_address
 
 from hikvision_sync.supabase_client import SupabaseClient
 from hikvision_sync.isapi_client import create_person_on_device, add_face_image_to_device, rate_limit_delay
-from hikvision_sync.orchestration import sync_angajat_to_device, sync_photo_only_to_device, update_photo_to_device, delete_user_from_device
+from hikvision_sync.orchestration import (
+    sync_angajat_to_device_with_data,
+    sync_photo_only_to_device_with_data,
+    update_photo_to_device_with_data,
+    delete_user_from_device
+)
 from hikvision_sync.events import DailyLogger, process_event_request
 
 # Load environment variables from .env file
@@ -363,8 +368,8 @@ async def sync_angajat_all_devices(
             device_id = device.get("id", "unknown")
             device_ip = device.get("ip_address", "unknown")
             
-            # Sync to this device using existing functionality
-            result = await sync_angajat_to_device(angajat, device, supabase_url)
+            # Sync to this device using direct image data functionality
+            result = await sync_angajat_to_device_with_data(angajat, device, supabase_url)
             
             # Record result
             per_device_results.append({
@@ -625,8 +630,8 @@ async def sync_all_to_all_devices(
                 device_id = device.get("id", "unknown")
                 device_ip = device.get("ip_address", "unknown")
                 
-                # Sync to this device (handles missing photo URLs automatically)
-                result = await sync_angajat_to_device(angajat, device, supabase_url)
+                # Sync to this device using direct image data (handles missing photo URLs automatically)
+                result = await sync_angajat_to_device_with_data(angajat, device, supabase_url)
                 
                 # Record device result in new format
                 device_success = result.status.value in ("success", "partial")
@@ -785,8 +790,8 @@ async def sync_angajat_photo_only(
             device_id = device.get("id", "unknown")
             device_ip = device.get("ip_address", "unknown")
             
-            # Sync photo only to this device (skips person creation)
-            result = await sync_photo_only_to_device(angajat, device, supabase_url)
+            # Sync photo only to this device using direct image data (skips person creation)
+            result = await sync_photo_only_to_device_with_data(angajat, device, supabase_url)
             
             # Record result
             per_device_results.append({
@@ -909,8 +914,8 @@ async def update_angajat_photo(
             device_id = device.get("id", "unknown")
             device_ip = device.get("ip_address", "unknown")
             
-            # Update photo to this device (PUT with POST fallback)
-            result = await update_photo_to_device(angajat, device, supabase_url)
+            # Update photo to this device using direct image data (PUT with POST fallback)
+            result = await update_photo_to_device_with_data(angajat, device, supabase_url)
             
             # Record result
             per_device_results.append({
