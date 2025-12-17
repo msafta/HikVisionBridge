@@ -67,7 +67,7 @@ async def _download_image_binary(image_url: str) -> bytes:
         Exception: If image processing fails
     """
     try:
-        print(f"  INFO: Downloading image from URL: {image_url}")
+        logger.info(f"Downloading image from URL: {image_url}")
         async with httpx.AsyncClient(timeout=30.0, verify=True) as client:
             response = await client.get(image_url)
             response.raise_for_status()
@@ -75,17 +75,17 @@ async def _download_image_binary(image_url: str) -> bytes:
             # Get image data
             image_data = response.content
             
-            print(f"  INFO: Image downloaded successfully, size: {len(image_data)} bytes")
+            logger.info(f"Image downloaded successfully, size: {len(image_data)} bytes")
             return image_data
             
     except httpx.TimeoutException as exc:
-        print(f"  ERROR: Timeout downloading image from {image_url}: {exc}")
+        logger.error(f"Timeout downloading image from {image_url}: {exc}")
         raise Exception(f"Image download timeout: {exc}") from exc
     except httpx.HTTPError as exc:
-        print(f"  ERROR: HTTP error downloading image from {image_url}: {exc}")
+        logger.error(f"HTTP error downloading image from {image_url}: {exc}")
         raise Exception(f"Image download failed: {exc}") from exc
     except Exception as exc:
-        print(f"  ERROR: Failed to download/process image from {image_url}: {exc}")
+        logger.error(f"Failed to download/process image from {image_url}: {exc}")
         raise Exception(f"Image processing failed: {exc}") from exc
 
 
@@ -806,12 +806,17 @@ async def add_face_image_to_device_with_data(device: dict, angajat: dict, supaba
     Returns:
         SyncResult with status and message (non-fatal errors return PARTIAL status)
     """
+    logger.info("=== Starting add_face_image_to_device_with_data ===")
     try:
         # Get foto_fata_url and construct full URL if needed (same logic as original function)
         biometrie = angajat.get("biometrie", {})
+        employee_no = biometrie.get("employee_no")
         foto_fata_url = biometrie.get("foto_fata_url")
         
+        logger.info(f"Employee No: {employee_no}, Foto URL: {foto_fata_url}")
+        
         if not foto_fata_url:
+            logger.warning("Missing foto_fata_url - skipping photo sync")
             return SyncResult(
                 SyncResultStatus.SKIPPED,
                 "Missing foto_fata_url - cannot sync photo without photo URL",
@@ -823,8 +828,9 @@ async def add_face_image_to_device_with_data(device: dict, angajat: dict, supaba
             if supabase_url:
                 # Construct full URL: https://xxx.supabase.co/storage/v1/object/public/pontaj-photos/{filename}
                 foto_fata_url = f"{supabase_url}/storage/v1/object/public/pontaj-photos/{foto_fata_url}"
-                print(f"  INFO: Constructed full Supabase Storage URL from filename")
+                logger.info(f"Constructed full Supabase Storage URL from filename: {foto_fata_url}")
             else:
+                logger.error(f"foto_fata_url is just a filename ('{foto_fata_url}') but supabase_url not provided")
                 return SyncResult(
                     SyncResultStatus.SKIPPED,
                     f"foto_fata_url is just a filename ('{foto_fata_url}') but supabase_url not provided to construct full URL",
@@ -834,12 +840,15 @@ async def add_face_image_to_device_with_data(device: dict, angajat: dict, supaba
         # Ensure HTTPS is used for Supabase storage URLs
         if foto_fata_url.startswith("http://") and ".supabase.co" in foto_fata_url:
             foto_fata_url = foto_fata_url.replace("http://", "https://", 1)
-            print(f"  INFO: Converted HTTP to HTTPS for Supabase URL")
+            logger.info("Converted HTTP to HTTPS for Supabase URL")
         
         # Download image as binary data
+        logger.info(f"Downloading image from: {foto_fata_url}")
         try:
             image_data = await _download_image_binary(foto_fata_url)
+            logger.info(f"Image downloaded successfully, size: {len(image_data)} bytes")
         except Exception as download_exc:
+            logger.error(f"Failed to download image: {download_exc}")
             return SyncResult(
                 SyncResultStatus.PARTIAL,
                 f"Failed to download image: {download_exc}",
@@ -853,7 +862,7 @@ async def add_face_image_to_device_with_data(device: dict, angajat: dict, supaba
         ip = device.get("ip_address") or device.get("ip")
         port = device.get("port") or 80  # Default to 80 if port is None or 0
         if port == 8000:  # Likely wrong port - Hikvision devices typically use 80
-            print(f"  WARNING: Port is 8000, but device info endpoint works on port 80. Using port 80 instead.")
+            logger.warning("Port is 8000, but device info endpoint works on port 80. Using port 80 instead.")
             port = 80
         url = f"http://{ip}:{port}/ISAPI/Intelligent/FDLib/FaceDataRecord?format=json"
         
@@ -862,14 +871,14 @@ async def add_face_image_to_device_with_data(device: dict, angajat: dict, supaba
         password = device.get("password_encrypted") or device.get("password", "")  # Note: despite name, this is plain password
         
         # Debug logging
-        print("DEBUG ISAPI Request (Face - Multipart Form Data):")
-        print(f"  Device URL: {url}")
-        print(f"  Username: {username}")
-        print(f"  Password length: {len(password)}")
-        print(f"  Password (first 3 chars): {password[:3] if password else 'None'}...")
-        print(f"  Image URL (downloaded from): {foto_fata_url}")
-        print(f"  Image size: {len(image_data)} bytes")
-        print(f"  JSON Payload: {json.dumps(payload, indent=2)}")
+        logger.info("DEBUG ISAPI Request (Face - Multipart Form Data):")
+        logger.info(f"  Device URL: {url}")
+        logger.info(f"  Username: {username}")
+        logger.info(f"  Password length: {len(password)}")
+        logger.info(f"  Password (first 3 chars): {password[:3] if password else 'None'}...")
+        logger.info(f"  Image URL (downloaded from): {foto_fata_url}")
+        logger.info(f"  Image size: {len(image_data)} bytes")
+        logger.info(f"  JSON Payload: {json.dumps(payload, indent=2)}")
         
         # Prepare multipart/form-data
         # According to ISAPI docs:

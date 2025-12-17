@@ -1,7 +1,11 @@
 """Orchestration logic for syncing Angajati to Hikvision devices."""
 
+import logging
 from typing import Optional
 from .models import SyncResult, SyncResultStatus
+
+# Set up logger for console output
+logger = logging.getLogger(__name__)
 from .isapi_client import (
     create_person_on_device,
     add_face_image_to_device,
@@ -308,8 +312,11 @@ async def sync_angajat_to_device_with_data(
     # Step 3: Add face image if foto_fata_url exists (only if person was newly created)
     foto_fata_url = biometrie.get("foto_fata_url")
     
+    logger.info(f"Checking for foto_fata_url: {foto_fata_url}")
+    
     if not foto_fata_url:
         # No photo URL - this is still success (person was created)
+        logger.info("No foto_fata_url - skipping photo sync")
         return SyncResult(
             SyncResultStatus.SUCCESS,
             f"Person created successfully. No photo URL available - photo step skipped",
@@ -317,7 +324,9 @@ async def sync_angajat_to_device_with_data(
         )
     
     # Attempt to add face image using direct image data (person was newly created)
+    logger.info(f"Calling add_face_image_to_device_with_data for employee_no={biometrie.get('employee_no')}")
     photo_result = await add_face_image_to_device_with_data(device, angajat, supabase_url)
+    logger.info(f"Photo sync result: status={photo_result.status.value}, message={photo_result.message}")
     
     # Determine final status:
     # - If person succeeded and photo succeeded → SUCCESS
