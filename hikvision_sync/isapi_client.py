@@ -881,24 +881,23 @@ async def add_face_image_to_device_with_data(device: dict, angajat: dict, supaba
         logger.info(f"  JSON Payload: {json.dumps(payload, indent=2)}")
         
         # Prepare multipart/form-data
-        # According to ISAPI docs:
-        # - Parameter name "faceURL" with Content-Type "application/json" contains the JSON message
-        # - Parameter name "img" with Content-Type "image/jpeg" contains the binary image data
+        # Hikvision is case-sensitive for part names - use "FaceDataRecord" for image part
         json_payload_str = json.dumps(payload)
         files = {
             'faceURL': (None, json_payload_str, 'application/json'),
-            'img': ('facePic.jpg', image_data, 'image/jpeg')
+            'FaceDataRecord': ('facePic.jpg', image_data, 'image/jpeg')
         }
         
         # Debug logging for multipart request
         logger.info("DEBUG Multipart Request Details:")
         logger.info(f"  JSON Payload (faceURL parameter): {json_payload_str}")
         logger.info(f"  JSON Payload length: {len(json_payload_str)} bytes")
-        logger.info(f"  Image file name: facePic.jpg")
+        logger.info(f"Multipart image filename: facePic.jpg")
+        logger.info(f"Multipart image content-type: image/jpeg")
         logger.info(f"  Image file size: {len(image_data)} bytes")
         logger.info(f"  Image file first 20 bytes (hex): {image_data[:20].hex()}")
-        logger.info(f"  Image file Content-Type: image/jpeg")
         logger.info(f"  Total multipart size (approx): {len(json_payload_str) + len(image_data)} bytes")
+        logger.info(f"  Multipart files dict: {list(files.keys())}")
         
         # Make request with Digest Auth using multipart/form-data
         headers = {
@@ -907,6 +906,10 @@ async def add_face_image_to_device_with_data(device: dict, angajat: dict, supaba
         logger.info(f"  Request Headers: {headers}")
         logger.info(f"  Using multipart/form-data format")
         logger.info(f"  Sending POST request to: {url}")
+        
+        # 1️⃣ Confirm image bytes are really there
+        logger.info(f"FINAL image bytes length: {len(image_data)}")
+        logger.info(f"FINAL image first 20 bytes: {image_data[:20].hex()}")
         
         response = requests.post(
             url,
@@ -1063,24 +1066,23 @@ async def update_face_image_to_device_with_data(device: dict, angajat: dict, sup
         print(f"  JSON Payload: {json.dumps(payload, indent=2)}")
 
         # Prepare multipart/form-data
-        # According to ISAPI docs:
-        # - Parameter name "faceURL" with Content-Type "application/json" contains the JSON message
-        # - Parameter name "img" with Content-Type "image/jpeg" contains the binary image data
+        # Hikvision is case-sensitive for part names - use "FaceDataRecord" for image part
         json_payload_str = json.dumps(payload)
         files = {
             'faceURL': (None, json_payload_str, 'application/json'),
-            'img': ('facePic.jpg', image_data, 'image/jpeg')
+            'FaceDataRecord': ('facePic.jpg', image_data, 'image/jpeg')
         }
 
         # Debug logging for multipart request
         logger.info("DEBUG Multipart Request Details:")
         logger.info(f"  JSON Payload (faceURL parameter): {json_payload_str}")
         logger.info(f"  JSON Payload length: {len(json_payload_str)} bytes")
-        logger.info(f"  Image file name: facePic.jpg")
+        logger.info(f"Multipart image filename: facePic.jpg")
+        logger.info(f"Multipart image content-type: image/jpeg")
         logger.info(f"  Image file size: {len(image_data)} bytes")
         logger.info(f"  Image file first 20 bytes (hex): {image_data[:20].hex()}")
-        logger.info(f"  Image file Content-Type: image/jpeg")
         logger.info(f"  Total multipart size (approx): {len(json_payload_str) + len(image_data)} bytes")
+        logger.info(f"  Multipart files dict: {list(files.keys())}")
 
         # Make request with Digest Auth using multipart/form-data
         headers = {
@@ -1089,7 +1091,11 @@ async def update_face_image_to_device_with_data(device: dict, angajat: dict, sup
         logger.info(f"  Request Headers: {headers}")
         logger.info(f"  Using multipart/form-data format")
         logger.info(f"  Sending PUT request to: {url}")
-
+        
+        # 1️⃣ Confirm image bytes are really there
+        logger.info(f"FINAL image bytes length: {len(image_data)}")
+        logger.info(f"FINAL image first 20 bytes: {image_data[:20].hex()}")
+        
         response = requests.put(
             url,
             files=files,
