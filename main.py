@@ -3,6 +3,7 @@ import ipaddress
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -221,6 +222,82 @@ if _SUPABASE_CLIENT and "dev" not in _SUPABASE_CLIENTS:
     _SUPABASE_CLIENTS["dev"] = _SUPABASE_CLIENT
 
 
+_DEVICE_MEDIU_CACHE: Dict[str, str] = {}
+_DEVICE_CACHE_LAST_REFRESH = 0.0
+_DEVICE_CACHE_TTL_SECONDS = 120
+_DEVICE_CACHE_LOCK = asyncio.Lock()
+
+
+def _normalize_ip(ip_value: Optional[str]) -> str:
+    return str(ip_value or "").strip()
+
+
+def _extract_event_device_ip(parsed_event: Optional[dict]) -> Optional[str]:
+    if not isinstance(parsed_event, dict):
+        return None
+    ip_val = parsed_event.get("ipAddress")
+    normalized = _normalize_ip(ip_val)
+    return normalized or None
+
+
+async def _refresh_device_mediu_cache(event_logger: logging.Logger, reason: str = "ttl_refresh") -> bool:
+    global _DEVICE_MEDIU_CACHE, _DEVICE_CACHE_LAST_REFRESH
+    dev_client = _SUPABASE_CLIENTS.get("dev")
+    if not dev_client:
+        event_logger.error("Cannot refresh device mediu cache: DEV Supabase client not configured.")
+        return False
+
+    try:
+        devices = await dev_client.get_active_devices()
+    except Exception as exc:
+        event_logger.error("Failed refreshing device mediu cache from Supabase (%s): %s", reason, exc)
+        return False
+
+    new_cache: Dict[str, str] = {}
+    for device in devices:
+        ip_value = _normalize_ip(device.get("ip_address") or device.get("ipAddress"))
+        mediu_value = str(device.get("mediu") or "").strip().lower()
+        if not ip_value:
+            continue
+        if mediu_value not in ("dev", "test", "prod"):
+            event_logger.warning(
+                "Skipping device with invalid mediu value ip=%s mediu=%s",
+                ip_value,
+                device.get("mediu"),
+            )
+            continue
+        new_cache[ip_value] = mediu_value
+
+    _DEVICE_MEDIU_CACHE = new_cache
+    _DEVICE_CACHE_LAST_REFRESH = time.time()
+    event_logger.info(
+        "Device mediu cache refreshed reason=%s size=%s",
+        reason,
+        len(_DEVICE_MEDIU_CACHE),
+    )
+    return True
+
+
+async def _ensure_device_cache_fresh(event_logger: logging.Logger, force: bool = False, reason: str = "ttl_check") -> bool:
+    now = time.time()
+    if not force and _DEVICE_MEDIU_CACHE and (now - _DEVICE_CACHE_LAST_REFRESH) < _DEVICE_CACHE_TTL_SECONDS:
+        return True
+
+    async with _DEVICE_CACHE_LOCK:
+        now = time.time()
+        if not force and _DEVICE_MEDIU_CACHE and (now - _DEVICE_CACHE_LAST_REFRESH) < _DEVICE_CACHE_TTL_SECONDS:
+            return True
+
+        refreshed = await _refresh_device_mediu_cache(event_logger=event_logger, reason=reason)
+        if refreshed:
+            return True
+
+        if _DEVICE_MEDIU_CACHE:
+            event_logger.warning("Using stale device mediu cache after refresh failure.")
+            return True
+        return False
+
+
 def _resolve_target_envs(mediu_raw: Optional[str]) -> List[str]:
     normalized = (mediu_raw or "").strip().lower()
     if normalized in ("dev", "test", "prod"):
@@ -369,6 +446,7 @@ async def require_auth(request: Request):
 def env_test():
     """Test endpoint to verify environment variables are loaded correctly."""
     active_clients = sorted(_SUPABASE_CLIENTS.keys())
+    cache_age_seconds = int(time.time() - _DEVICE_CACHE_LAST_REFRESH) if _DEVICE_CACHE_LAST_REFRESH else None
     return {
         "env": os.getenv("APP_ENV"),
         "vpn_subnet": os.getenv("VPN_SUBNET"),
@@ -378,6 +456,12 @@ def env_test():
             "dev": "dev" in _SUPABASE_CLIENTS,
             "test": "test" in _SUPABASE_CLIENTS,
             "prod": "prod" in _SUPABASE_CLIENTS,
+        },
+        "device_cache": {
+            "ttl_seconds": _DEVICE_CACHE_TTL_SECONDS,
+            "size": len(_DEVICE_MEDIU_CACHE),
+            "last_refresh_epoch": _DEVICE_CACHE_LAST_REFRESH if _DEVICE_CACHE_LAST_REFRESH else None,
+            "age_seconds": cache_age_seconds,
         },
     }
 
@@ -1096,21 +1180,41 @@ async def catch_all_post(request: Request, full_path: str):
     )
 
     if process_result.get("is_access_event") and process_result.get("parsed"):
-        mediu = process_result.get("mediu")
+        event_logger = _EVENT_LOGGER.get()
+        parsed_event = process_result["parsed"]
+        event_device_ip = _extract_event_device_ip(parsed_event)
+        if not event_device_ip:
+            event_logger.error("Unable to route event: missing ipAddress in payload.")
+            return PlainTextResponse("OK")
+
+        cache_available = await _ensure_device_cache_fresh(event_logger=event_logger, reason="event_route")
+        if not cache_available:
+            event_logger.error("Unable to route event for device_ip=%s: device cache unavailable.", event_device_ip)
+            return PlainTextResponse("OK")
+
+        mediu = _DEVICE_MEDIU_CACHE.get(event_device_ip)
+        cache_hit = mediu is not None
+        if not mediu:
+            await _ensure_device_cache_fresh(event_logger=event_logger, force=True, reason="cache_miss")
+            mediu = _DEVICE_MEDIU_CACHE.get(event_device_ip)
+
         target_envs = _resolve_target_envs(mediu)
         if not target_envs:
-            _EVENT_LOGGER.get().error(
-                "Invalid or missing mediu value '%s'. Event was not forwarded.",
+            event_logger.error(
+                "Unable to route event for device_ip=%s. mediu=%s. Event was not forwarded.",
+                event_device_ip,
                 mediu,
             )
         else:
             save_statuses = await _save_access_event_to_targets(
-                parsed_event=process_result["parsed"],
+                parsed_event=parsed_event,
                 target_envs=target_envs,
-                event_logger=_EVENT_LOGGER.get(),
+                event_logger=event_logger,
             )
-            _EVENT_LOGGER.get().info(
-                "Access event routing mediu_raw=%s targets=%s statuses=%s",
+            event_logger.info(
+                "Access event routing device_ip=%s cache_hit=%s mediu=%s targets=%s statuses=%s",
+                event_device_ip,
+                cache_hit,
                 mediu,
                 target_envs,
                 save_statuses,
