@@ -4,7 +4,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import httpx
 import jwt
@@ -168,9 +168,106 @@ app.add_middleware(
 )
 
 
-# Initialize Supabase client
-_SUPABASE_EDGE_FUNCTION_API_KEY = _get_config_value("SUPABASE_EDGE_FUNCTION_API_KEY", "supabase_edge_function_api_key", "hikvision-sync-2024")
-_SUPABASE_CLIENT = SupabaseClient(_SUPABASE_URL, _SUPABASE_EDGE_FUNCTION_API_KEY) if _SUPABASE_URL else None
+def _build_supabase_client_for_env(env_name: str) -> Optional[SupabaseClient]:
+    env_upper = env_name.upper()
+    env_lower = env_name.lower()
+
+    url = _get_config_value(f"SUPABASE_{env_upper}_URL", f"supabase_{env_lower}_url")
+    edge_key = _get_config_value(
+        f"SUPABASE_{env_upper}_EDGE_FUNCTION_API_KEY",
+        f"supabase_{env_lower}_edge_function_api_key",
+        "hikvision-sync-2024",
+    )
+    event_url = _get_config_value(
+        f"SUPABASE_{env_upper}_EVENT_FUNCTION_URL",
+        f"supabase_{env_lower}_event_function_url",
+    )
+    event_api_key = _get_config_value(
+        f"SUPABASE_{env_upper}_EVENT_FUNCTION_API_KEY",
+        f"supabase_{env_lower}_event_function_api_key",
+    )
+
+    # Backward compatibility: DEV can use legacy env names.
+    if env_lower == "dev":
+        url = url or _SUPABASE_URL
+        edge_key = edge_key or _get_config_value("SUPABASE_EDGE_FUNCTION_API_KEY", "supabase_edge_function_api_key", "hikvision-sync-2024")
+        event_url = event_url or _get_config_value("SUPABASE_EVENT_FUNCTION_URL", "supabase_event_function_url", "")
+        event_api_key = event_api_key or _get_config_value("SUPABASE_EVENT_FUNCTION_API_KEY", "supabase_event_function_api_key", "")
+
+    if not url:
+        return None
+
+    return SupabaseClient(
+        supabase_url=url,
+        api_key=edge_key,
+        event_function_url=event_url or "",
+        event_function_api_key=event_api_key or "",
+    )
+
+
+_SUPABASE_CLIENTS: Dict[str, SupabaseClient] = {}
+for _env_name in ("dev", "test", "prod"):
+    _client = _build_supabase_client_for_env(_env_name)
+    if _client:
+        _SUPABASE_CLIENTS[_env_name] = _client
+
+_SUPABASE_CLIENT = _SUPABASE_CLIENTS.get("dev")
+if _SUPABASE_CLIENT is None:
+    # Keep current behavior for single-env installs.
+    _SUPABASE_EDGE_FUNCTION_API_KEY = _get_config_value("SUPABASE_EDGE_FUNCTION_API_KEY", "supabase_edge_function_api_key", "hikvision-sync-2024")
+    _SUPABASE_CLIENT = SupabaseClient(_SUPABASE_URL, _SUPABASE_EDGE_FUNCTION_API_KEY) if _SUPABASE_URL else None
+
+if _SUPABASE_CLIENT and "dev" not in _SUPABASE_CLIENTS:
+    _SUPABASE_CLIENTS["dev"] = _SUPABASE_CLIENT
+
+
+def _resolve_target_envs(mediu_raw: Optional[str]) -> List[str]:
+    normalized = (mediu_raw or "").strip().lower()
+    if normalized in ("dev", "test", "prod"):
+        return [normalized]
+    return []
+
+
+async def _save_access_event_to_targets(parsed_event: dict, target_envs: List[str], event_logger: logging.Logger) -> Dict[str, str]:
+    tasks = []
+    task_envs = []
+    for env_name in target_envs:
+        client = _SUPABASE_CLIENTS.get(env_name)
+        if not client:
+            event_logger.error("Missing Supabase client for target environment '%s'", env_name)
+            continue
+        task_envs.append(env_name)
+        tasks.append(client.save_access_event(parsed_event))
+
+    if not tasks:
+        return {}
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    statuses: Dict[str, str] = {}
+
+    for env_name, result in zip(task_envs, results):
+        if isinstance(result, Exception):
+            statuses[env_name] = "error"
+            event_logger.error("Unexpected error saving event to %s: %s", env_name.upper(), result)
+            continue
+
+        if result.get("status") == "success":
+            statuses[env_name] = "success"
+            event_logger.info("Successfully saved access event to %s", env_name.upper())
+        else:
+            statuses[env_name] = "error"
+            error_type = result.get("error_type", "Unknown")
+            error_msg = result.get("error", "Unknown error")
+            status_code = result.get("status_code", "")
+            event_logger.error(
+                "Failed saving access event to %s: %s - %s%s",
+                env_name.upper(),
+                error_type,
+                error_msg,
+                f" (Status: {status_code})" if status_code else "",
+            )
+
+    return statuses
 
 
 # Legacy function wrappers for backward compatibility (if needed)
@@ -271,10 +368,17 @@ async def require_auth(request: Request):
 @app.get("/env-test")
 def env_test():
     """Test endpoint to verify environment variables are loaded correctly."""
+    active_clients = sorted(_SUPABASE_CLIENTS.keys())
     return {
         "env": os.getenv("APP_ENV"),
         "vpn_subnet": os.getenv("VPN_SUBNET"),
         "allowed_origins": os.getenv("ALLOWED_ORIGINS"),
+        "supabase_clients_active": active_clients,
+        "routing_ready": {
+            "dev": "dev" in _SUPABASE_CLIENTS,
+            "test": "test" in _SUPABASE_CLIENTS,
+            "prod": "prod" in _SUPABASE_CLIENTS,
+        },
     }
 
 
@@ -980,14 +1084,36 @@ async def catch_all_post(request: Request, full_path: str):
     body = await request.body()
     content_type = request.headers.get("content-type", "")
     
-    # Process event using events module
-    await process_event_request(
+    # Process event using events module (parse/log/classify only)
+    process_result = await process_event_request(
         body=body,
         content_type=content_type,
         path=full_path,
         event_logger=_EVENT_LOGGER.get(),
         access_logger=_ACCESS_LOGGER.get(),
-        supabase_client=_SUPABASE_CLIENT
+        supabase_client=None,
+        save_to_supabase=False,
     )
+
+    if process_result.get("is_access_event") and process_result.get("parsed"):
+        mediu = process_result.get("mediu")
+        target_envs = _resolve_target_envs(mediu)
+        if not target_envs:
+            _EVENT_LOGGER.get().error(
+                "Invalid or missing mediu value '%s'. Event was not forwarded.",
+                mediu,
+            )
+        else:
+            save_statuses = await _save_access_event_to_targets(
+                parsed_event=process_result["parsed"],
+                target_envs=target_envs,
+                event_logger=_EVENT_LOGGER.get(),
+            )
+            _EVENT_LOGGER.get().info(
+                "Access event routing mediu_raw=%s targets=%s statuses=%s",
+                mediu,
+                target_envs,
+                save_statuses,
+            )
     
     return PlainTextResponse("OK")

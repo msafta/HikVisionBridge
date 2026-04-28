@@ -10,9 +10,17 @@ from typing import List, Optional
 class SupabaseClient:
     """Client for Supabase Edge Function API."""
     
-    def __init__(self, supabase_url: str, api_key: str):
+    def __init__(
+        self,
+        supabase_url: str,
+        api_key: str,
+        event_function_url: str = "",
+        event_function_api_key: str = "",
+    ):
         self.edge_function_url = f"{supabase_url}/functions/v1/external-api-proxy"
         self.api_key = api_key
+        self.event_function_url = event_function_url or os.getenv("SUPABASE_EVENT_FUNCTION_URL", "")
+        self.event_function_api_key = event_function_api_key or os.getenv("SUPABASE_EVENT_FUNCTION_API_KEY", "")
     
     def _get_headers(self) -> dict:
         """Get headers for Edge Function calls."""
@@ -120,15 +128,9 @@ class SupabaseClient:
             This method uses a different Edge Function endpoint than other methods.
             Errors are caught and returned as dict (non-blocking) rather than raised.
         """
-        # Load endpoint URL and API key from environment variables
-        endpoint_url = os.getenv(
-            "SUPABASE_EVENT_FUNCTION_URL",
-            ""
-        )
-        api_key = os.getenv(
-            "SUPABASE_EVENT_FUNCTION_API_KEY",
-            ""
-        )
+        # Event function endpoint/key are configured per client (with env fallback)
+        endpoint_url = self.event_function_url
+        api_key = self.event_function_api_key
         
         headers = {
             "X-API-Key": api_key,

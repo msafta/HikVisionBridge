@@ -68,6 +68,20 @@ def extract_event(parsed):
     return None
 
 
+def extract_mediu(parsed) -> Optional[str]:
+    """Extract mediu value from parsed payload when available."""
+    if not isinstance(parsed, dict):
+        return None
+
+    raw = parsed.get("mediu")
+    if raw is None and isinstance(parsed.get("AccessControllerEvent"), dict):
+        raw = parsed["AccessControllerEvent"].get("mediu")
+
+    if raw is None:
+        return None
+    return str(raw).strip().lower()
+
+
 def is_access_event(parsed) -> bool:
     """Check if parsed event is an access control event (major=5, sub=75 or 76)."""
     event = extract_event(parsed)
@@ -141,7 +155,8 @@ async def process_event_request(
     path: str,
     event_logger: logging.Logger,
     access_logger: Optional[logging.Logger] = None,
-    supabase_client: Optional["SupabaseClient"] = None
+    supabase_client: Optional["SupabaseClient"] = None,
+    save_to_supabase: bool = True,
 ) -> dict:
     """
     Process incoming event request from Hikvision device.
@@ -179,8 +194,8 @@ async def process_event_request(
             access_logger.info(f"Content-Type: {content_type}")
             access_logger.info(decoded_body)
         
-        # Save to Supabase if client is provided
-        if supabase_client and parsed:
+        # Save to Supabase if requested and client is provided
+        if save_to_supabase and supabase_client and parsed:
             try:
                 result = await supabase_client.save_access_event(parsed)
                 if result.get("status") == "success":
@@ -208,6 +223,7 @@ async def process_event_request(
     return {
         "parsed": parsed,
         "is_access_event": is_access,
-        "save_status": save_status
+        "save_status": save_status,
+        "mediu": extract_mediu(parsed),
     }
 
