@@ -2,7 +2,9 @@
 
 import logging
 from typing import Optional
+
 from .models import SyncResult, SyncResultStatus
+from .photo_url import PhotoResolutionConfig, has_face_photo_source
 
 # Set up logger for console output
 logger = logging.getLogger(__name__)
@@ -12,7 +14,7 @@ from .isapi_client import (
     update_face_image_to_device,
     add_face_image_to_device_with_data,
     update_face_image_to_device_with_data,
-    delete_user_from_device as delete_user_from_device_isapi
+    delete_user_from_device as delete_user_from_device_isapi,
 )
 
 
@@ -254,7 +256,9 @@ async def update_photo_to_device(
 async def sync_angajat_to_device_with_data(
     angajat: dict,
     device: dict,
-    supabase_url: Optional[str] = None
+    supabase_url: Optional[str] = None,
+    photo_request: Optional[dict] = None,
+    photo_config: Optional[PhotoResolutionConfig] = None,
 ) -> SyncResult:
     """
     Sync one Angajat to one Hikvision device using direct image data (base64).
@@ -268,6 +272,8 @@ async def sync_angajat_to_device_with_data(
         angajat: Angajat dict with biometrie data (must include employee_no)
         device: Device dict with ip_address, port, username, password_encrypted
         supabase_url: Optional Supabase URL for constructing full image URLs
+        photo_request: Optional bridge body fields (foto_fata_signed_url, photo_resolver)
+        photo_config: Supabase base URL + edge API key (+ optional anon) for photo resolution
     
     Returns:
         SyncResult with status:
@@ -309,23 +315,25 @@ async def sync_angajat_to_device_with_data(
             "person"
         )
     
-    # Step 3: Add face image if foto_fata_url exists (only if person was newly created)
-    foto_fata_url = biometrie.get("foto_fata_url")
-    
-    logger.info(f"Checking for foto_fata_url: {foto_fata_url}")
-    
-    if not foto_fata_url:
-        # No photo URL - this is still success (person was created)
-        logger.info("No foto_fata_url - skipping photo sync")
+    # Step 3: Add face image if a photo source exists (only if person was newly created)
+    logger.info(
+        "Checking for face photo source (foto_fata_url / signed / callback): biometrie.foto_fata_url=%s",
+        biometrie.get("foto_fata_url"),
+    )
+
+    if not has_face_photo_source(angajat, photo_request):
+        logger.info("No face photo source - skipping photo sync")
         return SyncResult(
             SyncResultStatus.SUCCESS,
             f"Person created successfully. No photo URL available - photo step skipped",
             "person"
         )
-    
+
     # Attempt to add face image using direct image data (person was newly created)
     logger.info(f"Calling add_face_image_to_device_with_data for employee_no={biometrie.get('employee_no')}")
-    photo_result = await add_face_image_to_device_with_data(device, angajat, supabase_url)
+    photo_result = await add_face_image_to_device_with_data(
+        device, angajat, supabase_url, photo_request=photo_request, photo_config=photo_config
+    )
     logger.info(f"Photo sync result: status={photo_result.status.value}, message={photo_result.message}")
     
     # Determine final status:
@@ -351,7 +359,9 @@ async def sync_angajat_to_device_with_data(
 async def sync_photo_only_to_device_with_data(
     angajat: dict,
     device: dict,
-    supabase_url: Optional[str] = None
+    supabase_url: Optional[str] = None,
+    photo_request: Optional[dict] = None,
+    photo_config: Optional[PhotoResolutionConfig] = None,
 ) -> SyncResult:
     """
     Sync ONLY the face photo to one Hikvision device using direct image data (base64) (skips person creation).
@@ -361,13 +371,15 @@ async def sync_photo_only_to_device_with_data(
     
     Steps:
     1. Validate employee_no exists
-    2. Validate foto_fata_url exists
+    2. Validate a photo source exists (foto_fata_url, foto_fata_signed_url, or photo_resolver callback)
     3. Add face image to device (using direct image data)
     
     Args:
-        angajat: Angajat dict with biometrie data (must include employee_no and foto_fata_url)
+        angajat: Angajat dict with biometrie data (must include employee_no; photo via biometrie or photo_request)
         device: Device dict with ip_address, port, username, password_encrypted
         supabase_url: Optional Supabase URL for constructing full image URLs
+        photo_request: Optional bridge body fields (foto_fata_signed_url, photo_resolver)
+        photo_config: Supabase base URL + edge API key (+ optional anon) for photo resolution
     
     Returns:
         SyncResult with status:
@@ -387,18 +399,18 @@ async def sync_photo_only_to_device_with_data(
             "validation"
         )
     
-    # Step 2: Validate foto_fata_url exists
-    foto_fata_url = biometrie.get("foto_fata_url")
-    
-    if not foto_fata_url:
+    # Step 2: Validate a face photo source exists
+    if not has_face_photo_source(angajat, photo_request):
         return SyncResult(
             SyncResultStatus.SKIPPED,
             "Missing foto_fata_url - cannot sync photo without photo URL",
             "validation"
         )
-    
+
     # Step 3: Add face image using direct image data (skip person creation)
-    photo_result = await add_face_image_to_device_with_data(device, angajat, supabase_url)
+    photo_result = await add_face_image_to_device_with_data(
+        device, angajat, supabase_url, photo_request=photo_request, photo_config=photo_config
+    )
     
     # Return the photo result directly
     return photo_result
@@ -407,7 +419,9 @@ async def sync_photo_only_to_device_with_data(
 async def update_photo_to_device_with_data(
     angajat: dict,
     device: dict,
-    supabase_url: Optional[str] = None
+    supabase_url: Optional[str] = None,
+    photo_request: Optional[dict] = None,
+    photo_config: Optional[PhotoResolutionConfig] = None,
 ) -> SyncResult:
     """
     Update face photo on one Hikvision device with PUT fallback to POST using direct image data (base64).
@@ -418,15 +432,17 @@ async def update_photo_to_device_with_data(
     
     Steps:
     1. Validate employee_no exists
-    2. Validate foto_fata_url exists
+    2. Validate a photo source exists (foto_fata_url, foto_fata_signed_url, or photo_resolver callback)
     3. Attempt PUT update via update_face_image_to_device_with_data()
     4. If PUT succeeds → return SUCCESS
     5. If PUT fails → fallback to POST via add_face_image_to_device_with_data()
     
     Args:
-        angajat: Angajat dict with biometrie data (must include employee_no and foto_fata_url)
+        angajat: Angajat dict with biometrie data (must include employee_no; photo via biometrie or photo_request)
         device: Device dict with ip_address, port, username, password_encrypted
         supabase_url: Optional Supabase URL for constructing full image URLs
+        photo_request: Optional bridge body fields (foto_fata_signed_url, photo_resolver)
+        photo_config: Supabase base URL + edge API key (+ optional anon) for photo resolution
     
     Returns:
         SyncResult with status:
@@ -446,19 +462,19 @@ async def update_photo_to_device_with_data(
             "validation"
         )
     
-    # Step 2: Validate foto_fata_url exists
-    foto_fata_url = biometrie.get("foto_fata_url")
-    
-    if not foto_fata_url:
+    # Step 2: Validate a face photo source exists
+    if not has_face_photo_source(angajat, photo_request):
         return SyncResult(
             SyncResultStatus.SKIPPED,
             "Missing foto_fata_url - cannot update photo without photo URL",
             "validation"
         )
-    
+
     # Step 3: Attempt PUT update using direct image data
     print(f"  [UPDATE_PHOTO] Attempting PUT update for employee_no={biometrie.get('employee_no')}")
-    put_result = await update_face_image_to_device_with_data(device, angajat, supabase_url)
+    put_result = await update_face_image_to_device_with_data(
+        device, angajat, supabase_url, photo_request=photo_request, photo_config=photo_config
+    )
     print(f"  [UPDATE_PHOTO] PUT result: status={put_result.status.value}, message={put_result.message}")
     
     # Step 4: If PUT succeeded, return SUCCESS
@@ -472,7 +488,9 @@ async def update_photo_to_device_with_data(
     # Step 5: PUT failed - fallback to POST (create) using direct image data
     # Note: PUT failures return PARTIAL status, so we fallback to POST
     print(f"  [UPDATE_PHOTO] PUT failed, falling back to POST for employee_no={biometrie.get('employee_no')}")
-    post_result = await add_face_image_to_device_with_data(device, angajat, supabase_url)
+    post_result = await add_face_image_to_device_with_data(
+        device, angajat, supabase_url, photo_request=photo_request, photo_config=photo_config
+    )
     print(f"  [UPDATE_PHOTO] POST result: status={post_result.status.value}, message={post_result.message}")
     
     # Return POST result (SUCCESS if fallback worked, PARTIAL if both failed)

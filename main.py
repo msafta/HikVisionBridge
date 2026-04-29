@@ -18,6 +18,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+from hikvision_sync.photo_url import PhotoResolutionConfig
 from hikvision_sync.supabase_client import SupabaseClient
 from hikvision_sync.isapi_client import create_person_on_device, add_face_image_to_device, rate_limit_delay
 from hikvision_sync.orchestration import (
@@ -328,6 +329,40 @@ def _get_supabase_public_base_url_for_env(env_name: str) -> Optional[str]:
     return url if url else None
 
 
+def _get_supabase_anon_key_for_env(env_name: str) -> Optional[str]:
+    """Public anon key for Edge/Storage calls (optional; adds apikey + Authorization when set)."""
+    env_upper = env_name.upper()
+    env_lower = env_name.lower()
+    key = _get_config_value(f"SUPABASE_{env_upper}_ANON_KEY", f"supabase_{env_lower}_anon_key")
+    if env_lower == "dev":
+        key = key or _get_config_value("SUPABASE_ANON_KEY", "supabase_anon_key")
+    return key if key else None
+
+
+def _photo_request_from_body(body: dict) -> dict:
+    """Subset of bridge JSON forwarded to photo resolution (signed URL + bulk callback mode)."""
+    out: dict = {}
+    if "foto_fata_signed_url" in body and body.get("foto_fata_signed_url") is not None:
+        out["foto_fata_signed_url"] = body.get("foto_fata_signed_url")
+    pr = body.get("photo_resolver")
+    if isinstance(pr, dict):
+        out["photo_resolver"] = pr
+    return out
+
+
+def _photo_resolution_from_body(body: dict, sb_client: SupabaseClient, supabase_url: str) -> Tuple[dict, PhotoResolutionConfig]:
+    """Build (photo_request, PhotoResolutionConfig) for orchestration/isapi."""
+    mediu, _ = _parse_sync_mediu(body)
+    anon = _get_supabase_anon_key_for_env(mediu)
+    photo_request = _photo_request_from_body(body)
+    photo_config = PhotoResolutionConfig(
+        supabase_url=supabase_url or "",
+        edge_api_key=sb_client.api_key,
+        anon_key=anon,
+    )
+    return photo_request, photo_config
+
+
 def _get_supabase_client_for_sync(mediu: str) -> Optional[SupabaseClient]:
     return _SUPABASE_CLIENTS.get(mediu)
 
@@ -532,7 +567,9 @@ async def sync_angajat_all_devices(
     Request body:
     {
         "angajat_id": "<uuid>",   # Required: UUID of the angajat to sync
-        "mediu": "dev|test|prod"  # Optional: defaults to "dev"
+        "mediu": "dev|test|prod", # Optional: defaults to "dev"
+        "foto_fata_signed_url": "<https...>",  # Optional: signed GET for private bucket
+        "photo_resolver": {"mode": "callback"}  # Optional: bulk-style; per-angajat get-photo-url
     }
     
     Returns:
@@ -583,6 +620,8 @@ async def sync_angajat_all_devices(
             "status": "error",
             "error": sync_err,
         }
+
+    photo_request, photo_config = _photo_resolution_from_body(body, sb_client, supabase_url or "")
     
     try:
         # Fetch angajat with biometrie data
@@ -616,7 +655,13 @@ async def sync_angajat_all_devices(
             device_ip = device.get("ip_address", "unknown")
             
             # Sync to this device using direct image data functionality
-            result = await sync_angajat_to_device_with_data(angajat, device, supabase_url)
+            result = await sync_angajat_to_device_with_data(
+                angajat,
+                device,
+                supabase_url,
+                photo_request=photo_request,
+                photo_config=photo_config,
+            )
             
             # Record result
             per_device_results.append({
@@ -787,7 +832,9 @@ async def sync_all_to_all_devices(
     
     Request body:
     {
-        "mediu": "dev|test|prod"  # Optional: defaults to "dev"
+        "mediu": "dev|test|prod",  # Optional: defaults to "dev"
+        "foto_fata_signed_url": "<https...>",  # Optional
+        "photo_resolver": {"mode": "callback"}  # Optional: fetch signed URL per angajat via Edge
     }
     
     Returns:
@@ -831,6 +878,8 @@ async def sync_all_to_all_devices(
             "status": "error",
             "error": sync_err,
         }
+
+    photo_request, photo_config = _photo_resolution_from_body(body, sb_client, supabase_url or "")
 
     try:
         # Fetch all active angajati with biometrie data
@@ -880,7 +929,13 @@ async def sync_all_to_all_devices(
                 device_ip = device.get("ip_address", "unknown")
                 
                 # Sync to this device using direct image data (handles missing photo URLs automatically)
-                result = await sync_angajat_to_device_with_data(angajat, device, supabase_url)
+                result = await sync_angajat_to_device_with_data(
+                    angajat,
+                    device,
+                    supabase_url,
+                    photo_request=photo_request,
+                    photo_config=photo_config,
+                )
                 
                 # Record device result in new format
                 device_success = result.status.value in ("success", "partial")
@@ -968,7 +1023,9 @@ async def sync_angajat_photo_only(
     Request body:
     {
         "angajat_id": "<uuid>",   # Required: UUID of the angajat to sync photo for
-        "mediu": "dev|test|prod"  # Optional: defaults to "dev"
+        "mediu": "dev|test|prod", # Optional: defaults to "dev"
+        "foto_fata_signed_url": "<https...>",  # Optional: signed GET for private bucket
+        "photo_resolver": {"mode": "callback"}  # Optional
     }
     
     Returns:
@@ -1006,6 +1063,8 @@ async def sync_angajat_photo_only(
             "status": "error",
             "error": sync_err,
         }
+
+    photo_request, photo_config = _photo_resolution_from_body(body, sb_client, supabase_url or "")
     
     try:
         # Fetch angajat with biometrie data
@@ -1039,7 +1098,13 @@ async def sync_angajat_photo_only(
             device_ip = device.get("ip_address", "unknown")
             
             # Sync photo only to this device using direct image data (skips person creation)
-            result = await sync_photo_only_to_device_with_data(angajat, device, supabase_url)
+            result = await sync_photo_only_to_device_with_data(
+                angajat,
+                device,
+                supabase_url,
+                photo_request=photo_request,
+                photo_config=photo_config,
+            )
             
             # Record result
             per_device_results.append({
@@ -1091,7 +1156,9 @@ async def update_angajat_photo(
     Request body:
     {
         "angajat_id": "<uuid>",   # Required: UUID of the angajat to update photo for
-        "mediu": "dev|test|prod"  # Optional: defaults to "dev"
+        "mediu": "dev|test|prod", # Optional: defaults to "dev"
+        "foto_fata_signed_url": "<https...>",  # Optional: signed GET for private bucket
+        "photo_resolver": {"mode": "callback"}  # Optional
     }
     
     Returns:
@@ -1129,6 +1196,8 @@ async def update_angajat_photo(
             "status": "error",
             "error": sync_err,
         }
+
+    photo_request, photo_config = _photo_resolution_from_body(body, sb_client, supabase_url or "")
     
     try:
         # Fetch angajat with biometrie data
@@ -1162,7 +1231,13 @@ async def update_angajat_photo(
             device_ip = device.get("ip_address", "unknown")
             
             # Update photo to this device using direct image data (PUT with POST fallback)
-            result = await update_photo_to_device_with_data(angajat, device, supabase_url)
+            result = await update_photo_to_device_with_data(
+                angajat,
+                device,
+                supabase_url,
+                photo_request=photo_request,
+                photo_config=photo_config,
+            )
             
             # Record result
             per_device_results.append({

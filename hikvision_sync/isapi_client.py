@@ -6,7 +6,9 @@ import logging
 import requests
 import httpx
 from typing import Optional
+
 from .models import SyncResult, SyncResultStatus
+from .photo_url import PhotoResolutionConfig, has_face_photo_source, resolve_downloadable_face_url
 
 # Set up logger for console output
 logger = logging.getLogger(__name__)
@@ -139,32 +141,38 @@ def _build_person_payload(angajat: dict) -> dict:
     }
 
 
-def _build_face_image_payload(angajat: dict, supabase_url: Optional[str] = None) -> dict:
+def _build_face_image_payload(
+    angajat: dict,
+    supabase_url: Optional[str] = None,
+    resolved_face_url: Optional[str] = None,
+) -> dict:
     """
     Build ISAPI Face Image payload from angajat data.
     Args:
         angajat: Dict with angajat data including biometrie.employee_no and foto_fata_url
         supabase_url: Optional Supabase URL (e.g., "https://xxx.supabase.co") to construct full URL if foto_fata_url is just a filename
+        resolved_face_url: If set, used as faceURL (signed URL or legacy public URL)
     Returns:
         JSON payload dict for ISAPI Face Image addition
     """
     biometrie = angajat.get("biometrie", {})
     employee_no = biometrie.get("employee_no")
-    foto_fata_url = biometrie.get("foto_fata_url")
+    foto_fata_url = resolved_face_url if resolved_face_url else biometrie.get("foto_fata_url")
     
     if not employee_no:
         raise ValueError("employee_no is required for face image sync")
     if not foto_fata_url:
         raise ValueError("foto_fata_url is required for face image sync")
     
-    # If foto_fata_url is just a filename (no http:// or https://), construct full Supabase Storage URL
-    if not foto_fata_url.startswith("http://") and not foto_fata_url.startswith("https://"):
-        if supabase_url:
-            # Construct full URL: https://xxx.supabase.co/storage/v1/object/public/pontaj-photos/{filename}
-            foto_fata_url = f"{supabase_url}/storage/v1/object/public/pontaj-photos/{foto_fata_url}"
-            print(f"  INFO: Constructed full Supabase Storage URL from filename")
-        else:
-            raise ValueError(f"foto_fata_url is just a filename ('{foto_fata_url}') but supabase_url not provided to construct full URL")
+    if not resolved_face_url:
+        # If foto_fata_url is just a filename (no http:// or https://), construct full Supabase Storage URL
+        if not foto_fata_url.startswith("http://") and not foto_fata_url.startswith("https://"):
+            if supabase_url:
+                # Construct full URL: https://xxx.supabase.co/storage/v1/object/public/pontaj-photos/{filename}
+                foto_fata_url = f"{supabase_url}/storage/v1/object/public/pontaj-photos/{foto_fata_url}"
+                print(f"  INFO: Constructed full Supabase Storage URL from filename")
+            else:
+                raise ValueError(f"foto_fata_url is just a filename ('{foto_fata_url}') but supabase_url not provided to construct full URL")
     
     # Ensure HTTPS is used for Supabase storage URLs (devices need HTTPS for external URLs)
     if foto_fata_url.startswith("http://") and ".supabase.co" in foto_fata_url:
@@ -179,32 +187,38 @@ def _build_face_image_payload(angajat: dict, supabase_url: Optional[str] = None)
     }
 
 
-def _build_face_image_update_payload(angajat: dict, supabase_url: Optional[str] = None) -> dict:
+def _build_face_image_update_payload(
+    angajat: dict,
+    supabase_url: Optional[str] = None,
+    resolved_face_url: Optional[str] = None,
+) -> dict:
     """
     Build ISAPI Face Image update payload from angajat data (for PUT request).
     Args:
         angajat: Dict with angajat data including biometrie.employee_no and foto_fata_url
         supabase_url: Optional Supabase URL (e.g., "https://xxx.supabase.co") to construct full URL if foto_fata_url is just a filename
+        resolved_face_url: If set, used as faceURL (signed URL or legacy public URL)
     Returns:
         JSON payload dict for ISAPI Face Image update (PUT request)
     """
     biometrie = angajat.get("biometrie", {})
     employee_no = biometrie.get("employee_no")
-    foto_fata_url = biometrie.get("foto_fata_url")
+    foto_fata_url = resolved_face_url if resolved_face_url else biometrie.get("foto_fata_url")
     
     if not employee_no:
         raise ValueError("employee_no is required for face image update")
     if not foto_fata_url:
         raise ValueError("foto_fata_url is required for face image update")
     
-    # If foto_fata_url is just a filename (no http:// or https://), construct full Supabase Storage URL
-    if not foto_fata_url.startswith("http://") and not foto_fata_url.startswith("https://"):
-        if supabase_url:
-            # Construct full URL: https://xxx.supabase.co/storage/v1/object/public/pontaj-photos/{filename}
-            foto_fata_url = f"{supabase_url}/storage/v1/object/public/pontaj-photos/{foto_fata_url}"
-            print(f"  INFO: Constructed full Supabase Storage URL from filename")
-        else:
-            raise ValueError(f"foto_fata_url is just a filename ('{foto_fata_url}') but supabase_url not provided to construct full URL")
+    if not resolved_face_url:
+        # If foto_fata_url is just a filename (no http:// or https://), construct full Supabase Storage URL
+        if not foto_fata_url.startswith("http://") and not foto_fata_url.startswith("https://"):
+            if supabase_url:
+                # Construct full URL: https://xxx.supabase.co/storage/v1/object/public/pontaj-photos/{filename}
+                foto_fata_url = f"{supabase_url}/storage/v1/object/public/pontaj-photos/{foto_fata_url}"
+                print(f"  INFO: Constructed full Supabase Storage URL from filename")
+            else:
+                raise ValueError(f"foto_fata_url is just a filename ('{foto_fata_url}') but supabase_url not provided to construct full URL")
     
     # Ensure HTTPS is used for Supabase storage URLs (devices need HTTPS for external URLs)
     if foto_fata_url.startswith("http://") and ".supabase.co" in foto_fata_url:
@@ -796,65 +810,70 @@ async def update_face_image_to_device(device: dict, angajat: dict, supabase_url:
         )
 
 
-async def add_face_image_to_device_with_data(device: dict, angajat: dict, supabase_url: Optional[str] = None) -> SyncResult:
+async def add_face_image_to_device_with_data(
+    device: dict,
+    angajat: dict,
+    supabase_url: Optional[str] = None,
+    photo_request: Optional[dict] = None,
+    photo_config: Optional[PhotoResolutionConfig] = None,
+) -> SyncResult:
     """
     Add face image to Person on Hikvision device via ISAPI using direct image data (base64).
     Args:
         device: Device dict with ip_address, port, username, password_encrypted
         angajat: Angajat dict with biometrie data including foto_fata_url
         supabase_url: Optional Supabase URL to construct full image URL if foto_fata_url is just a filename
+        photo_request: Optional foto_fata_signed_url / photo_resolver from bridge HTTP body
+        photo_config: Supabase base URL + edge API key (+ optional anon) for signed/callback resolution
     Returns:
         SyncResult with status and message (non-fatal errors return PARTIAL status)
     """
     logger.info("=== Starting add_face_image_to_device_with_data ===")
     try:
-        # Get foto_fata_url and construct full URL if needed (same logic as original function)
         biometrie = angajat.get("biometrie", {})
         employee_no = biometrie.get("employee_no")
-        foto_fata_url = biometrie.get("foto_fata_url")
-        
-        logger.info(f"Employee No: {employee_no}, Foto URL: {foto_fata_url}")
-        
-        if not foto_fata_url:
-            logger.warning("Missing foto_fata_url - skipping photo sync")
+        cfg = photo_config or PhotoResolutionConfig(
+            supabase_url=(supabase_url or "").strip(),
+            edge_api_key="",
+        )
+        if not cfg.supabase_url.strip() and supabase_url:
+            cfg = PhotoResolutionConfig(
+                supabase_url=(supabase_url or "").strip(),
+                edge_api_key=cfg.edge_api_key,
+                anon_key=cfg.anon_key,
+            )
+
+        if not has_face_photo_source(angajat, photo_request):
+            logger.warning("Missing face photo source (foto_fata_url, foto_fata_signed_url, or photo_resolver callback)")
             return SyncResult(
                 SyncResultStatus.SKIPPED,
                 "Missing foto_fata_url - cannot sync photo without photo URL",
-                "photo"
+                "photo",
             )
-        
-        # If foto_fata_url is just a filename (no http:// or https://), construct full Supabase Storage URL
-        if not foto_fata_url.startswith("http://") and not foto_fata_url.startswith("https://"):
-            if supabase_url:
-                # Construct full URL: https://xxx.supabase.co/storage/v1/object/public/pontaj-photos/{filename}
-                foto_fata_url = f"{supabase_url}/storage/v1/object/public/pontaj-photos/{foto_fata_url}"
-                logger.info(f"Constructed full Supabase Storage URL from filename: {foto_fata_url}")
-            else:
-                logger.error(f"foto_fata_url is just a filename ('{foto_fata_url}') but supabase_url not provided")
-                return SyncResult(
-                    SyncResultStatus.SKIPPED,
-                    f"foto_fata_url is just a filename ('{foto_fata_url}') but supabase_url not provided to construct full URL",
-                    "photo"
-                )
-        
-        # Ensure HTTPS is used for Supabase storage URLs
-        if foto_fata_url.startswith("http://") and ".supabase.co" in foto_fata_url:
-            foto_fata_url = foto_fata_url.replace("http://", "https://", 1)
-            logger.info("Converted HTTP to HTTPS for Supabase URL")
-        
-        # Download image as binary data
-        logger.info(f"Downloading image from: {foto_fata_url}")
+
+        resolved_url = await resolve_downloadable_face_url(photo_request, angajat, cfg)
+        if not resolved_url:
+            return SyncResult(
+                SyncResultStatus.PARTIAL,
+                "Could not resolve a downloadable photo URL",
+                "photo",
+            )
+
+        log_url = resolved_url if len(resolved_url) <= 160 else resolved_url[:120] + "..."
+        logger.info("Employee No: %s, resolved download URL: %s", employee_no, log_url)
+
+        logger.info("Downloading image from: %s", resolved_url)
         try:
-            image_data = await _download_image_binary(foto_fata_url)
+            image_data = await _download_image_binary(resolved_url)
             logger.info(f"Image downloaded successfully, size: {len(image_data)} bytes")
         except Exception as download_exc:
             logger.error(f"Failed to download image: {download_exc}")
             return SyncResult(
                 SyncResultStatus.PARTIAL,
                 f"Failed to download image: {download_exc}",
-                "photo"
+                "photo",
             )
-        
+
         # Build JSON payload (without image data - sent as separate multipart part)
         payload = _build_face_image_payload_with_data(angajat)
         
@@ -876,7 +895,7 @@ async def add_face_image_to_device_with_data(device: dict, angajat: dict, supaba
         logger.info(f"  Username: {username}")
         logger.info(f"  Password length: {len(password)}")
         logger.info(f"  Password (first 3 chars): {password[:3] if password else 'None'}...")
-        logger.info(f"  Image URL (downloaded from): {foto_fata_url}")
+        logger.info(f"  Image URL (downloaded from): {resolved_url}")
         logger.info(f"  Image size: {len(image_data)} bytes")
         logger.info(f"  JSON Payload: {json.dumps(payload, indent=2)}")
         
@@ -988,7 +1007,13 @@ async def add_face_image_to_device_with_data(device: dict, angajat: dict, supaba
         )
 
 
-async def update_face_image_to_device_with_data(device: dict, angajat: dict, supabase_url: Optional[str] = None) -> SyncResult:
+async def update_face_image_to_device_with_data(
+    device: dict,
+    angajat: dict,
+    supabase_url: Optional[str] = None,
+    photo_request: Optional[dict] = None,
+    photo_config: Optional[PhotoResolutionConfig] = None,
+) -> SyncResult:
     """
     Update face image on Hikvision device via ISAPI (PUT) using direct image data (base64), fallback-ready.
 
@@ -996,50 +1021,48 @@ async def update_face_image_to_device_with_data(device: dict, angajat: dict, sup
         device: Device dict with ip_address, port, username, password_encrypted
         angajat: Angajat dict with biometrie data including foto_fata_url
         supabase_url: Optional Supabase URL to construct full image URL if foto_fata_url is just a filename
+        photo_request: Optional foto_fata_signed_url / photo_resolver from bridge HTTP body
+        photo_config: Supabase base URL + edge API key (+ optional anon) for signed/callback resolution
 
     Returns:
         SyncResult with status and message (errors are PARTIAL to allow POST fallback)
     """
     try:
-        # Get foto_fata_url and construct full URL if needed (same logic as original function)
-        biometrie = angajat.get("biometrie", {})
-        foto_fata_url = biometrie.get("foto_fata_url")
-        
-        if not foto_fata_url:
+        cfg = photo_config or PhotoResolutionConfig(
+            supabase_url=(supabase_url or "").strip(),
+            edge_api_key="",
+        )
+        if not cfg.supabase_url.strip() and supabase_url:
+            cfg = PhotoResolutionConfig(
+                supabase_url=(supabase_url or "").strip(),
+                edge_api_key=cfg.edge_api_key,
+                anon_key=cfg.anon_key,
+            )
+
+        if not has_face_photo_source(angajat, photo_request):
             return SyncResult(
                 SyncResultStatus.SKIPPED,
                 "Missing foto_fata_url - cannot update photo without photo URL",
-                "photo"
+                "photo",
             )
-        
-        # If foto_fata_url is just a filename (no http:// or https://), construct full Supabase Storage URL
-        if not foto_fata_url.startswith("http://") and not foto_fata_url.startswith("https://"):
-            if supabase_url:
-                # Construct full URL: https://xxx.supabase.co/storage/v1/object/public/pontaj-photos/{filename}
-                foto_fata_url = f"{supabase_url}/storage/v1/object/public/pontaj-photos/{foto_fata_url}"
-                print(f"  INFO: Constructed full Supabase Storage URL from filename")
-            else:
-                return SyncResult(
-                    SyncResultStatus.SKIPPED,
-                    f"foto_fata_url is just a filename ('{foto_fata_url}') but supabase_url not provided to construct full URL",
-                    "photo"
-                )
-        
-        # Ensure HTTPS is used for Supabase storage URLs
-        if foto_fata_url.startswith("http://") and ".supabase.co" in foto_fata_url:
-            foto_fata_url = foto_fata_url.replace("http://", "https://", 1)
-            print(f"  INFO: Converted HTTP to HTTPS for Supabase URL")
-        
-        # Download image as binary data
+
+        resolved_url = await resolve_downloadable_face_url(photo_request, angajat, cfg)
+        if not resolved_url:
+            return SyncResult(
+                SyncResultStatus.PARTIAL,
+                "Could not resolve a downloadable photo URL",
+                "photo",
+            )
+
         try:
-            image_data = await _download_image_binary(foto_fata_url)
+            image_data = await _download_image_binary(resolved_url)
         except Exception as download_exc:
             return SyncResult(
                 SyncResultStatus.PARTIAL,
                 f"Failed to download image: {download_exc}",
-                "photo"
+                "photo",
             )
-        
+
         # Build JSON payload (without image data - sent as separate multipart part)
         payload = _build_face_image_update_payload_with_data(angajat)
 
@@ -1061,7 +1084,7 @@ async def update_face_image_to_device_with_data(device: dict, angajat: dict, sup
         print(f"  Username: {username}")
         print(f"  Password length: {len(password)}")
         print(f"  Password (first 3 chars): {password[:3] if password else 'None'}...")
-        print(f"  Image URL (downloaded from): {foto_fata_url}")
+        print(f"  Image URL (downloaded from): {resolved_url}")
         print(f"  Image size: {len(image_data)} bytes")
         print(f"  JSON Payload: {json.dumps(payload, indent=2)}")
 
