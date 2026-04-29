@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -511,6 +512,7 @@ class _AuthVerifier:
 
 
 _AUTH_VERIFIER = _AuthVerifier(_SUPABASE_JWKS_URL, _SUPABASE_JWT_SECRET)
+_REQUEST_LOGGER = logging.getLogger("hikvision.request")
 
 
 def _extract_bearer_token(auth_header: Optional[str]) -> Optional[str]:
@@ -526,6 +528,14 @@ async def require_auth(request: Request):
     payload = _AUTH_VERIFIER.verify(token)
     request.state.user = payload
     return payload
+
+
+def _request_id_for(request: Request) -> str:
+    """Use caller-provided request id if present, otherwise generate one."""
+    header_val = request.headers.get("X-Request-Id") or request.headers.get("X-Correlation-Id")
+    if header_val and header_val.strip():
+        return header_val.strip()
+    return str(uuid.uuid4())[:8]
 
 
 @app.get("/env-test")
@@ -605,6 +615,7 @@ async def sync_angajat_all_devices(
             "status": "error",
             "error": "Invalid JSON in request body"
         }
+    request_id = _request_id_for(request)
     
     # Validate request body
     angajat_id = body.get("angajat_id")
@@ -613,6 +624,12 @@ async def sync_angajat_all_devices(
             "status": "error",
             "error": "Missing required field: angajat_id"
         }
+    _REQUEST_LOGGER.info(
+        "request_id=%s endpoint=sync-angajat-all-devices angajat_id=%s mediu=%s",
+        request_id,
+        angajat_id,
+        body.get("mediu") or body.get("environment") or "dev",
+    )
 
     sb_client, supabase_url, sync_err = _resolve_sync_supabase(body)
     if sync_err:
@@ -742,6 +759,13 @@ async def delete_user(
             "status": "error",
             "error": "Missing required field: angajat_id"
         }
+    request_id = _request_id_for(request)
+    _REQUEST_LOGGER.info(
+        "request_id=%s endpoint=delete-user angajat_id=%s mediu=%s",
+        request_id,
+        angajat_id,
+        body.get("mediu") or body.get("environment") or "dev",
+    )
 
     sb_client, _, sync_err = _resolve_sync_supabase(body)
     if sync_err:
@@ -878,6 +902,12 @@ async def sync_all_to_all_devices(
             "status": "error",
             "error": sync_err,
         }
+    request_id = _request_id_for(request)
+    _REQUEST_LOGGER.info(
+        "request_id=%s endpoint=sync-all-to-all-devices mediu=%s",
+        request_id,
+        body.get("mediu") or body.get("environment") or "dev",
+    )
 
     photo_request, photo_config = _photo_resolution_from_body(body, sb_client, supabase_url or "")
 
@@ -1056,6 +1086,13 @@ async def sync_angajat_photo_only(
             "status": "error",
             "error": "Missing required field: angajat_id"
         }
+    request_id = _request_id_for(request)
+    _REQUEST_LOGGER.info(
+        "request_id=%s endpoint=sync-angajat-photo-only angajat_id=%s mediu=%s",
+        request_id,
+        angajat_id,
+        body.get("mediu") or body.get("environment") or "dev",
+    )
 
     sb_client, supabase_url, sync_err = _resolve_sync_supabase(body)
     if sync_err:
@@ -1189,6 +1226,13 @@ async def update_angajat_photo(
             "status": "error",
             "error": "Missing required field: angajat_id"
         }
+    request_id = _request_id_for(request)
+    _REQUEST_LOGGER.info(
+        "request_id=%s endpoint=update-angajat-photo angajat_id=%s mediu=%s",
+        request_id,
+        angajat_id,
+        body.get("mediu") or body.get("environment") or "dev",
+    )
 
     sb_client, supabase_url, sync_err = _resolve_sync_supabase(body)
     if sync_err:
