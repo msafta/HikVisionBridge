@@ -225,9 +225,13 @@ if _SUPABASE_CLIENT and "dev" not in _SUPABASE_CLIENTS:
 
 
 _DEVICE_MEDIU_CACHE: Dict[str, str] = {}
+_DEVICE_CACHE_SOURCE_COUNTS: Dict[str, int] = {}
 _DEVICE_CACHE_LAST_REFRESH = 0.0
 _DEVICE_CACHE_TTL_SECONDS = 120
 _DEVICE_CACHE_LOCK = asyncio.Lock()
+
+# Merge order for ip -> mediu: later env overwrites (TEST wins over DEV for same IP).
+_DEVICE_CACHE_MERGE_ORDER = ("dev", "test", "prod")
 
 
 def _normalize_ip(ip_value: Optional[str]) -> str:
@@ -242,40 +246,89 @@ def _extract_event_device_ip(parsed_event: Optional[dict]) -> Optional[str]:
     return normalized or None
 
 
+async def _fetch_active_devices_for_cache(env: str, client: SupabaseClient):
+    """Returns (env, devices_or_none, error_or_none). Never raises."""
+    try:
+        devices = await client.get_active_devices()
+        return env, devices, None
+    except Exception as exc:
+        return env, None, exc
+
+
 async def _refresh_device_mediu_cache(event_logger: logging.Logger, reason: str = "ttl_refresh") -> bool:
-    global _DEVICE_MEDIU_CACHE, _DEVICE_CACHE_LAST_REFRESH
-    dev_client = _SUPABASE_CLIENTS.get("dev")
-    if not dev_client:
-        event_logger.error("Cannot refresh device mediu cache: DEV Supabase client not configured.")
+    """
+    Build ip -> mediu map from get_active_devices() in every configured Supabase project.
+    Merge order dev, then test, then prod: same IP later overwrites (e.g. TEST row wins over DEV).
+    """
+    global _DEVICE_MEDIU_CACHE, _DEVICE_CACHE_SOURCE_COUNTS, _DEVICE_CACHE_LAST_REFRESH
+    if not _SUPABASE_CLIENTS:
+        event_logger.error("Cannot refresh device mediu cache: no Supabase clients configured.")
         return False
 
-    try:
-        devices = await dev_client.get_active_devices()
-    except Exception as exc:
-        event_logger.error("Failed refreshing device mediu cache from Supabase (%s): %s", reason, exc)
-        return False
+    envs_ordered = [e for e in _DEVICE_CACHE_MERGE_ORDER if e in _SUPABASE_CLIENTS]
+    results = await asyncio.gather(
+        *(_fetch_active_devices_for_cache(env, _SUPABASE_CLIENTS[env]) for env in envs_ordered),
+    )
 
     new_cache: Dict[str, str] = {}
-    for device in devices:
-        ip_value = _normalize_ip(device.get("ip_address") or device.get("ipAddress"))
-        mediu_value = str(device.get("mediu") or "").strip().lower()
-        if not ip_value:
-            continue
-        if mediu_value not in ("dev", "test", "prod"):
-            event_logger.warning(
-                "Skipping device with invalid mediu value ip=%s mediu=%s",
-                ip_value,
-                device.get("mediu"),
+    source_counts: Dict[str, int] = {env: 0 for env in envs_ordered}
+    any_fetch_ok = False
+
+    for env, devices, err in results:
+        if err is not None:
+            event_logger.error(
+                "Device mediu cache: get_active_devices failed for env=%s (%s): %s",
+                env,
+                reason,
+                err,
             )
             continue
-        new_cache[ip_value] = mediu_value
+        any_fetch_ok = True
+        if not devices:
+            continue
+        added = 0
+        for device in devices:
+            ip_value = _normalize_ip(device.get("ip_address") or device.get("ipAddress"))
+            mediu_value = str(device.get("mediu") or "").strip().lower()
+            if not ip_value:
+                continue
+            if mediu_value not in ("dev", "test", "prod"):
+                event_logger.warning(
+                    "Skipping device with invalid mediu value env=%s ip=%s mediu=%s",
+                    env,
+                    ip_value,
+                    device.get("mediu"),
+                )
+                continue
+            previous = new_cache.get(ip_value)
+            if previous is not None and previous != mediu_value:
+                event_logger.warning(
+                    "Device mediu cache: same IP in multiple projects ip=%s previous_mediu=%s "
+                    "overwritten by env=%s new_mediu=%s",
+                    ip_value,
+                    previous,
+                    env,
+                    mediu_value,
+                )
+            new_cache[ip_value] = mediu_value
+            added += 1
+        source_counts[env] = added
+
+    if not any_fetch_ok:
+        event_logger.error(
+            "Device mediu cache refresh failed for all environments (%s); no Supabase fetch succeeded.",
+            reason,
+        )
+        return False
 
     _DEVICE_MEDIU_CACHE = new_cache
+    _DEVICE_CACHE_SOURCE_COUNTS = source_counts
     _DEVICE_CACHE_LAST_REFRESH = time.time()
     event_logger.info(
-        "Device mediu cache refreshed reason=%s size=%s",
+        "Device mediu cache refreshed reason=%s size=%s per_env=%s",
         reason,
         len(_DEVICE_MEDIU_CACHE),
+        source_counts,
     )
     return True
 
@@ -558,6 +611,7 @@ def env_test():
             "size": len(_DEVICE_MEDIU_CACHE),
             "last_refresh_epoch": _DEVICE_CACHE_LAST_REFRESH if _DEVICE_CACHE_LAST_REFRESH else None,
             "age_seconds": cache_age_seconds,
+            "sources": dict(_DEVICE_CACHE_SOURCE_COUNTS),
         },
     }
 
