@@ -5,7 +5,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import httpx
 import jwt
@@ -305,6 +305,57 @@ def _resolve_target_envs(mediu_raw: Optional[str]) -> List[str]:
     return []
 
 
+def _parse_sync_mediu(body: dict) -> Tuple[Optional[str], Optional[str]]:
+    """Read mediu from request body. Returns (mediu_or_none, error_message)."""
+    raw = body.get("mediu")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        raw = body.get("environment")
+    if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+        return "dev", None
+    normalized = str(raw).strip().lower()
+    if normalized in ("dev", "test", "prod"):
+        return normalized, None
+    return None, f"Invalid mediu: {raw!r}; expected dev, test, or prod"
+
+
+def _get_supabase_public_base_url_for_env(env_name: str) -> Optional[str]:
+    """Resolve public Supabase base URL using same rules as client construction."""
+    env_upper = env_name.upper()
+    env_lower = env_name.lower()
+    url = _get_config_value(f"SUPABASE_{env_upper}_URL", f"supabase_{env_lower}_url")
+    if env_lower == "dev":
+        url = url or _SUPABASE_URL
+    return url if url else None
+
+
+def _get_supabase_client_for_sync(mediu: str) -> Optional[SupabaseClient]:
+    return _SUPABASE_CLIENTS.get(mediu)
+
+
+def _resolve_sync_supabase(body: dict) -> Tuple[Optional[SupabaseClient], Optional[str], Optional[str]]:
+    """
+    Resolve Supabase client and public URL for Hikvision sync endpoints.
+    Returns (client, supabase_public_url, error_message).
+    """
+    mediu, parse_err = _parse_sync_mediu(body)
+    if parse_err:
+        return None, None, parse_err
+
+    assert mediu is not None
+    client = _get_supabase_client_for_sync(mediu)
+    if not client:
+        return None, None, (
+            f"Supabase client for mediu={mediu!r} is not configured on this bridge. "
+            f"Set SUPABASE_{mediu.upper()}_URL and SUPABASE_{mediu.upper()}_EDGE_FUNCTION_API_KEY "
+            "(for dev, SUPABASE_URL / SUPABASE_EDGE_FUNCTION_API_KEY are also accepted)."
+        )
+
+    base_url = _get_supabase_public_base_url_for_env(mediu)
+    if not base_url:
+        return None, None, f"Supabase public URL for mediu={mediu!r} is not configured."
+    return client, base_url, None
+
+
 async def _save_access_event_to_targets(parsed_event: dict, target_envs: List[str], event_logger: logging.Logger) -> Dict[str, str]:
     tasks = []
     task_envs = []
@@ -480,7 +531,8 @@ async def sync_angajat_all_devices(
     
     Request body:
     {
-        "angajat_id": "<uuid>"  # Required: UUID of the angajat to sync
+        "angajat_id": "<uuid>",   # Required: UUID of the angajat to sync
+        "mediu": "dev|test|prod"  # Optional: defaults to "dev"
     }
     
     Returns:
@@ -517,12 +569,6 @@ async def sync_angajat_all_devices(
             "error": "Invalid JSON in request body"
         }
     
-    if not _SUPABASE_CLIENT:
-        return {
-            "status": "error",
-            "error": "Supabase client not initialized"
-        }
-    
     # Validate request body
     angajat_id = body.get("angajat_id")
     if not angajat_id:
@@ -530,10 +576,17 @@ async def sync_angajat_all_devices(
             "status": "error",
             "error": "Missing required field: angajat_id"
         }
+
+    sb_client, supabase_url, sync_err = _resolve_sync_supabase(body)
+    if sync_err:
+        return {
+            "status": "error",
+            "error": sync_err,
+        }
     
     try:
         # Fetch angajat with biometrie data
-        angajat = await _SUPABASE_CLIENT.get_angajat_with_biometrie(angajat_id)
+        angajat = await sb_client.get_angajat_with_biometrie(angajat_id)
         if not angajat:
             return {
                 "status": "error",
@@ -541,7 +594,7 @@ async def sync_angajat_all_devices(
             }
         
         # Fetch all active devices
-        devices = await _SUPABASE_CLIENT.get_active_devices()
+        devices = await sb_client.get_active_devices()
         if not devices:
             return {
                 "status": "error",
@@ -556,9 +609,6 @@ async def sync_angajat_all_devices(
             "skipped": 0,
             "fatal": 0
         }
-        
-        # Get Supabase URL for constructing image URLs (from .env, not config file)
-        supabase_url = _get_config_value("SUPABASE_URL", "supabase_url")
         
         # Sync to each device sequentially (using existing sync_angajat_to_device function)
         for device in devices:
@@ -615,7 +665,8 @@ async def delete_user(
     
     Request body:
     {
-        "angajat_id": "<uuid>"  # Required: UUID of the angajat to delete
+        "angajat_id": "<uuid>",   # Required: UUID of the angajat to delete
+        "mediu": "dev|test|prod"  # Optional: defaults to "dev"
     }
     
     Returns:
@@ -639,12 +690,6 @@ async def delete_user(
         ]
     }
     """
-    if not _SUPABASE_CLIENT:
-        return {
-            "status": "error",
-            "error": "Supabase client not initialized"
-        }
-    
     # Validate request body
     angajat_id = body.get("angajat_id")
     if not angajat_id:
@@ -652,10 +697,17 @@ async def delete_user(
             "status": "error",
             "error": "Missing required field: angajat_id"
         }
+
+    sb_client, _, sync_err = _resolve_sync_supabase(body)
+    if sync_err:
+        return {
+            "status": "error",
+            "error": sync_err,
+        }
     
     try:
         # Fetch angajat with biometrie data
-        angajat = await _SUPABASE_CLIENT.get_angajat_with_biometrie(angajat_id)
+        angajat = await sb_client.get_angajat_with_biometrie(angajat_id)
         if not angajat:
             return {
                 "status": "error",
@@ -663,7 +715,7 @@ async def delete_user(
             }
         
         # Fetch all active devices
-        devices = await _SUPABASE_CLIENT.get_active_devices()
+        devices = await sb_client.get_active_devices()
         if not devices:
             return {
                 "status": "error",
@@ -734,7 +786,9 @@ async def sync_all_to_all_devices(
     Continues syncing even if some angajati don't have photos uploaded yet.
     
     Request body:
-    {}  # No parameters required
+    {
+        "mediu": "dev|test|prod"  # Optional: defaults to "dev"
+    }
     
     Returns:
     {
@@ -771,15 +825,16 @@ async def sync_all_to_all_devices(
         ]
     }
     """
-    if not _SUPABASE_CLIENT:
+    sb_client, supabase_url, sync_err = _resolve_sync_supabase(body)
+    if sync_err:
         return {
             "status": "error",
-            "error": "Supabase client not initialized"
+            "error": sync_err,
         }
-    
+
     try:
         # Fetch all active angajati with biometrie data
-        angajati = await _SUPABASE_CLIENT.get_all_active_angajati_with_biometrie()
+        angajati = await sb_client.get_all_active_angajati_with_biometrie()
         if not angajati:
             return {
                 "status": "error",
@@ -787,7 +842,7 @@ async def sync_all_to_all_devices(
             }
         
         # Fetch all active devices
-        devices = await _SUPABASE_CLIENT.get_active_devices()
+        devices = await sb_client.get_active_devices()
         if not devices:
             return {
                 "status": "error",
@@ -804,9 +859,6 @@ async def sync_all_to_all_devices(
             "skipped": 0,
             "fatal": 0
         }
-        
-        # Get Supabase URL for constructing image URLs (from .env, not config file)
-        supabase_url = _get_config_value("SUPABASE_URL", "supabase_url")
         
         # Sync each angajat to all devices sequentially
         for angajat in angajati:
@@ -915,7 +967,8 @@ async def sync_angajat_photo_only(
     
     Request body:
     {
-        "angajat_id": "<uuid>"  # Required: UUID of the angajat to sync photo for
+        "angajat_id": "<uuid>",   # Required: UUID of the angajat to sync photo for
+        "mediu": "dev|test|prod"  # Optional: defaults to "dev"
     }
     
     Returns:
@@ -939,12 +992,6 @@ async def sync_angajat_photo_only(
         ]
     }
     """
-    if not _SUPABASE_CLIENT:
-        return {
-            "status": "error",
-            "error": "Supabase client not initialized"
-        }
-    
     # Validate request body
     angajat_id = body.get("angajat_id")
     if not angajat_id:
@@ -952,10 +999,17 @@ async def sync_angajat_photo_only(
             "status": "error",
             "error": "Missing required field: angajat_id"
         }
+
+    sb_client, supabase_url, sync_err = _resolve_sync_supabase(body)
+    if sync_err:
+        return {
+            "status": "error",
+            "error": sync_err,
+        }
     
     try:
         # Fetch angajat with biometrie data
-        angajat = await _SUPABASE_CLIENT.get_angajat_with_biometrie(angajat_id)
+        angajat = await sb_client.get_angajat_with_biometrie(angajat_id)
         if not angajat:
             return {
                 "status": "error",
@@ -963,7 +1017,7 @@ async def sync_angajat_photo_only(
             }
         
         # Fetch all active devices
-        devices = await _SUPABASE_CLIENT.get_active_devices()
+        devices = await sb_client.get_active_devices()
         if not devices:
             return {
                 "status": "error",
@@ -978,9 +1032,6 @@ async def sync_angajat_photo_only(
             "skipped": 0,
             "fatal": 0
         }
-        
-        # Get Supabase URL for constructing image URLs (from .env, not config file)
-        supabase_url = _get_config_value("SUPABASE_URL", "supabase_url")
         
         # Sync photo to each device sequentially (using sync_photo_only_to_device function)
         for device in devices:
@@ -1039,7 +1090,8 @@ async def update_angajat_photo(
     
     Request body:
     {
-        "angajat_id": "<uuid>"  # Required: UUID of the angajat to update photo for
+        "angajat_id": "<uuid>",   # Required: UUID of the angajat to update photo for
+        "mediu": "dev|test|prod"  # Optional: defaults to "dev"
     }
     
     Returns:
@@ -1063,12 +1115,6 @@ async def update_angajat_photo(
         ]
     }
     """
-    if not _SUPABASE_CLIENT:
-        return {
-            "status": "error",
-            "error": "Supabase client not initialized"
-        }
-    
     # Validate request body
     angajat_id = body.get("angajat_id")
     if not angajat_id:
@@ -1076,10 +1122,17 @@ async def update_angajat_photo(
             "status": "error",
             "error": "Missing required field: angajat_id"
         }
+
+    sb_client, supabase_url, sync_err = _resolve_sync_supabase(body)
+    if sync_err:
+        return {
+            "status": "error",
+            "error": sync_err,
+        }
     
     try:
         # Fetch angajat with biometrie data
-        angajat = await _SUPABASE_CLIENT.get_angajat_with_biometrie(angajat_id)
+        angajat = await sb_client.get_angajat_with_biometrie(angajat_id)
         if not angajat:
             return {
                 "status": "error",
@@ -1087,7 +1140,7 @@ async def update_angajat_photo(
             }
         
         # Fetch all active devices
-        devices = await _SUPABASE_CLIENT.get_active_devices()
+        devices = await sb_client.get_active_devices()
         if not devices:
             return {
                 "status": "error",
@@ -1102,9 +1155,6 @@ async def update_angajat_photo(
             "skipped": 0,
             "fatal": 0
         }
-        
-        # Get Supabase URL for constructing image URLs (from .env, not config file)
-        supabase_url = _get_config_value("SUPABASE_URL", "supabase_url")
         
         # Update photo to each device sequentially (using update_photo_to_device function)
         for device in devices:
